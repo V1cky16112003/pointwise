@@ -486,7 +486,11 @@ def main(argv=None) -> None:
             )
             window_loss, window_questions, window_start = 0.0, 0, time.time()
 
-        if (time.time() - last_checkpoint) / 60 > args.checkpoint_minutes:
+        # Ranks must agree: deciding on each rank's own clock deadlocked run 2 (one in barrier, one in backward).
+        due = torch.tensor([float((time.time() - last_checkpoint) / 60 > args.checkpoint_minutes)], device=device)
+        if distributed:
+            dist.all_reduce(due, op=dist.ReduceOp.MAX)
+        if due.item():
             if rank == 0:
                 check_dev()
                 save_checkpoint(out_dir / "checkpoint", model, optimizer, scaler, step, total_steps or schedule_total,
