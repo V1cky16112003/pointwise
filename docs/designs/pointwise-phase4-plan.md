@@ -121,7 +121,7 @@ attached as input, **Save & Run All**.
   checkpoint timing on its own clock; rank 1 entered the barrier while rank 0 kept
   training, so both hung until the 2 h NCCL timeout. Fixed in f3a2461 (all-reduce
   the "checkpoint due" flag). No results.
-- **Run 2, attempt 2** (2026-10-13, Kaggle session 357990976, commit f3a2461, 2×T4):
+- **Run 2, attempt 2** (2026-10-13, Kaggle session 357992486, commit f3a2461, 2×T4):
   2 epochs, 4,902 steps, 5.3 GPU-hours, finished without error.
   - **Dev curve** (scaled NLL every ~485 steps): 0.403 → 0.368 → 0.338 → 0.352 →
     0.339 → 0.352 → 0.332 → 0.332 → 0.329 → 0.323 → **0.3227 at step 4,902**. The best
@@ -145,7 +145,7 @@ attached as input, **Save & Run All**.
     and tends to give better out-of-distribution calibration than log loss alone. Keep
     2 epochs and the same gate.~~ Withdrawn 2026-10-14: Kev recorded CE + Brier as a
     negative result. See `pointwise-phase4-review.md` for the revised plan.
-- **Run 3** (2026-10-14, Kaggle `mini-jev-phase-0`, commit 6093453, 2×T4): Kev's base recipe
+- **Run 3** (2026-10-14, Kaggle `mini-jev-phase-0` session 358167213, commit 6093453, 2×T4): Kev's base recipe
   (`pointwise-phase4-review.md`): 2,000 train records per public source (34,118 records,
   44,812 examples after augmentation), Kev's option augmentation, lr 1e-4 for LoRA and head,
   weight decay 0.01, 2 epochs (1,622 steps), 1.8 GPU-hours, finished without error.
