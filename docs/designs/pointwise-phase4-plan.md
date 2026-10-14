@@ -117,3 +117,30 @@ attached as input, **Save & Run All**.
     PAWS is the weakest (13 points above chance, confidently wrong).
   - Session 2 as planned would take this to ~7.7 epochs; with no dev-loss curve, it
     could deepen the overfitting rather than fix calibration.
+- **Run 2, attempt 1** (2026-10-07): DDP deadlock at step 525. Each rank decided
+  checkpoint timing on its own clock; rank 1 entered the barrier while rank 0 kept
+  training, so both hung until the 2 h NCCL timeout. Fixed in f3a2461 (all-reduce
+  the "checkpoint due" flag). No results.
+- **Run 2, attempt 2** (2026-10-13, Kaggle session 357990976, commit f3a2461, 2×T4):
+  2 epochs, 4,902 steps, 5.3 GPU-hours, finished without error.
+  - **Dev curve** (scaled NLL every ~485 steps): 0.403 → 0.368 → 0.338 → 0.352 →
+    0.339 → 0.352 → 0.332 → 0.332 → 0.329 → 0.323 → **0.3227 at step 4,902**. The best
+    checkpoint is the last step: no overfitting inside 2 epochs (run 1's came from epochs 3–4).
+  - **Dev (in-domain, 2,230 questions):** accuracy 0.870, NLL 0.323, ECE 0.022.
+    T fitted on dev = **1.32** (run 1: 3.20), so the model is far less overconfident in-domain.
+  - **Held-out** (accuracy / chance / raw ECE / ECE after T):
+    QNLI 0.866 / 0.50 / 0.094 / 0.138, TweetEval 0.672 / 0.33 / 0.032 / 0.064,
+    Emotion 0.504 / 0.17 / 0.163 / 0.099, PAWS 0.654 / 0.50 / 0.255 / 0.223,
+    Banking77 zero-shot 0.626 / 0.013 / 0.196 / 0.135. Out-of-domain ECE (all four):
+    raw 0.092, **after T 0.080** (run 1: 0.074).
+  - **Gate: FAIL** (ECE 0.080 > 0.05). Accuracy is clearly above chance on every source,
+    and every source beats run 1.
+  - **Likely cause:** in-domain T doesn't carry over out of domain. PAWS stays
+    confidently wrong (ECE 0.22, alone enough to break the pooled number), and QNLI gets
+    *worse* after scaling (0.094 → 0.138): T > 1 makes an already-accurate source
+    underconfident. One global temperature fitted on dev can't fix miscalibration
+    that points in different directions on different held-out sources.
+  - **Proposed next change (not started):** train with a larger Brier weight (the
+    Brier variant set aside in the plan). Brier penalises confident mistakes boundedly
+    and tends to give better out-of-distribution calibration than log loss alone. Keep
+    2 epochs and the same gate.
