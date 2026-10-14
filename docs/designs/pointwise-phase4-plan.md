@@ -199,3 +199,30 @@ attached as input, **Save & Run All**.
     noted, using run 3 (best pooled ECE, 0.056) as the Phase 4 model. The remaining Kev
     ingredient, its 1,680 rule-structure records, targets rule-following rather than the
     QNLI and Emotion gaps, so it is unlikely to close the gate on its own.
+- **Run 5** (2026-10-14, Kaggle `mini-jev-phase-0` session 358341509, commit d8b4b4b, 2×T4): run 4
+  plus Kev's rule-structure records (`src/pointwise/data/rules.py`, 1,680 train-only records,
+  4.8% of train questions; policies + rules 25.0%). 2 epochs = 834 steps, 0.97 h of training,
+  ~1.1 GPU-hours of quota, finished without error.
+  - **Dev curve** (scaled NLL): 0.491 → 0.431 → 0.414 → **0.4036 at step 834** (still falling at
+    the end). Dev accuracy 0.843, ECE 0.020, T = **1.43**.
+  - **Held-out** (accuracy / ECE after T):
+
+    | Source | Run 5 | Run 4 | Run 3 | Run 2 |
+    |---|---|---|---|---|
+    | QNLI | 0.796 / 0.040 | 0.812 / 0.072 | 0.818 / 0.082 | 0.866 / 0.138 |
+    | PAWS | 0.732 / 0.188 | 0.736 / 0.144 | 0.750 / 0.133 | 0.654 / 0.223 |
+    | Emotion | 0.460 / 0.184 | 0.522 / 0.164 | 0.492 / 0.159 | 0.504 / 0.099 |
+    | TweetEval | 0.654 / 0.053 | 0.696 / 0.042 | 0.652 / 0.038 | 0.672 / 0.064 |
+    | Banking77 (zero-shot) | 0.610 / 0.093 | 0.632 / 0.105 | 0.626 / 0.113 | 0.626 / 0.135 |
+    | **Pooled OOD ECE** | **0.085** | 0.063 | 0.056 | 0.080 |
+
+  - PAWS non-paraphrases called paraphrase: 129 of 299 (run 4: 125, run 3: 118, run 2: 169);
+    paraphrases missed 5 of 201.
+  - **Gate: FAIL.** ECE 0.085 > 0.05, the worst since run 1. The regression guard also fails:
+    QNLI −7.0 and Emotion −4.4 points vs run 2 (limit 3).
+  - **Reading:** the rule records did not help the natural-language sources; PAWS and Emotion
+    became more over-confident. All of Kev's base-recipe ingredients have now been tried
+    (runs 3–5) and none brings pooled ECE under 0.05 on this backbone.
+  - **Next step (decided by the goal's rule):** go to Phase 5 with the Phase 4 gate FAIL noted.
+    Carry forward **run 3** (session 358167213, commit 6093453): best pooled OOD ECE (0.056)
+    of all runs, with QNLI 4.8 points below run 2 as its known regression.
