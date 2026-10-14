@@ -145,3 +145,27 @@ attached as input, **Save & Run All**.
     and tends to give better out-of-distribution calibration than log loss alone. Keep
     2 epochs and the same gate.~~ Withdrawn 2026-10-14: Kev recorded CE + Brier as a
     negative result. See `pointwise-phase4-review.md` for the revised plan.
+- **Run 3** (2026-10-14, Kaggle `mini-jev-phase-0`, commit 6093453, 2×T4): Kev's base recipe
+  (`pointwise-phase4-review.md`): 2,000 train records per public source (34,118 records,
+  44,812 examples after augmentation), Kev's option augmentation, lr 1e-4 for LoRA and head,
+  weight decay 0.01, 2 epochs (1,622 steps), 1.8 GPU-hours, finished without error.
+  - **Dev curve** (scaled NLL): 0.498 → 0.434 → 0.400 → 0.394 → 0.399 → **0.3917 at step 1,541**
+    → 0.3918. Best checkpoint 1,541; dev accuracy 0.840, ECE 0.016, T = **1.52** (run 2: 1.32).
+  - **Held-out** (accuracy / raw ECE / ECE after T), run 2 in brackets:
+    QNLI 0.818 / 0.019 / 0.082 (0.866 / 0.138), PAWS 0.750 / 0.176 / 0.130 (0.654 / 0.223),
+    Emotion 0.492 / 0.258 / 0.159 (0.504 / 0.099), TweetEval 0.652 / 0.092 / 0.038 (0.672 / 0.064),
+    Banking77 zero-shot 0.626 / 0.209 / 0.113 (0.626 / 0.135).
+    Out-of-domain pooled: accuracy 0.678, raw ECE 0.129, **ECE after T 0.056** (run 2: 0.080).
+  - PAWS (gold, predicted): non-paraphrases called paraphrase 118 of 299 (run 2: 169);
+    paraphrases missed 7 of 201 (run 2: 4). The lexical-overlap shortcut is weaker.
+  - **Gate: FAIL.** ECE 0.056 > 0.05. Accuracy is above chance on every source. The goal's
+    regression guard also fails: QNLI is 4.8 points below run 2 (limit 3). Emotion (−1.2) and
+    TweetEval (−2.0) are within it; PAWS is +9.6.
+  - **Likely cause:** the cap left the 15,000 policy records untouched, so policies are now
+    44% of records and 67% of train questions (52,289 of 78,404). Kev's base recipe has
+    about 2,600 policy and rule records, 21% of its 12,576. The model now sees mostly
+    synthetic rule-following, which plausibly costs the natural-language sources:
+    QNLI accuracy and Emotion calibration (0.099 → 0.159) both got worse.
+  - **Proposed next change (not started):** cap policies at 2,000 records as well, keeping
+    everything else from run 3. That brings the mix close to Kev's balance and the run to
+    under an hour.
