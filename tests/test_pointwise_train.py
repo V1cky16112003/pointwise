@@ -185,3 +185,14 @@ def test_two_process_ddp_on_cpu(tmp_path, data_dir, tiny_model_dir):
     assert "world 2" in run.stdout
     assert torch.load(tmp_path / "pointwise-train" / "checkpoint" / "state.pt", weights_only=False)["step"] == 4
     assert (tmp_path / "pointwise-train" / "metrics.json").exists()
+
+
+def test_augment_flag_adds_none_pairs_and_keeps_every_record(data_dir, tokenizer):
+    args = T.parse_args(["--data-dir", str(data_dir), "--output-dir", "unused", "--augment"])
+    plain, _ = T.load_examples(data_dir / "train.jsonl", tokenizer, args)
+    aug, _ = T.load_examples(data_dir / "train.jsonl", tokenizer, args, augment=True)
+    pairs = [e for e in aug if "#none-" in e.id]
+    assert pairs and len(pairs) % 2 == 0
+    assert {e.id for e in aug} - {e.id for e in pairs} == {e.id for e in plain}
+    assert all(abs(sum(t) - 1) < 1e-6 and len(t) == len(q.option_offsets) for e in aug for t, q in zip(e.targets, e.encoded.questions))
+    assert T.load_examples(data_dir / "train.jsonl", tokenizer, args, augment=True)[0][0].targets == aug[0].targets  # reproducible

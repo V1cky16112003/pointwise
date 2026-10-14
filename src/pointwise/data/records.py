@@ -93,6 +93,82 @@ def validate(rec: dict) -> None:
             raise ValueError(f"{rec['id']}/{key}: target is not a distribution")
 
 
+# Ported from Kev's kev/data.py: "none" options appear both as the right answer and as a
+# wrong one, in varied wording, or the model learns "this wording => pick it".
+NONE_OPTIONS = [("other", "None of the above"), ("other", "A reason that fits none of the above"), ("none", "None of these"),
+                ("other", "Something else"), ("not_listed", "Not listed here"), ("none_of_the_above", None),
+                ("other", "A category that fits none of the above"), ("other", "None of the listed options apply"),
+                ("unknown", "Cannot be determined from the options given"), ("other", "Other"), ("none", None),
+                ("other", "An answer not covered by the other options"), ("no_match", "No option matches")]
+DISTRACTORS = {"weather": "Bad weather caused it", "purple": "The colour purple", "pancakes": "A recipe for pancakes",
+               "taxes": "Unrelated: quarterly tax filing"}
+
+
+def _hard_gold(target: list[float]) -> int | None:
+    """Index of a one-hot target's gold option; None for a soft target, which augmentation leaves alone
+    (adding or removing options would change what it means)."""
+    return target.index(1.0) if sorted(target)[-2:] == [0.0, 1.0] else None
+
+
+def _choice(q: dict, crit: dict, gold: str, rng: random.Random) -> tuple[dict, list[float]]:
+    keys = list(crit)
+    rng.shuffle(keys)
+    return {**q, "criteria": {k: crit[k] for k in keys}}, one_hot(len(keys), keys.index(gold))
+
+
+def augment(rec: dict, rng: random.Random, p_none=0.10, p_none_distract=0.12, p_distract=0.15) -> dict:
+    """Kev's augment on one record's Choice questions, each drawn once: with p_none a none option replaces the
+    gold and becomes the answer (only with > 2 options); with p_none_distract a none option is added as a wrong
+    answer; with p_distract an irrelevant distractor is added. Options are reshuffled either way."""
+    questions, targets = {}, {}
+    for key, q in rec["request"]["questions"].items():
+        target = rec["targets"][key]
+        gi = _hard_gold(target) if q["type"] == "choice" else None
+        if gi is None:
+            questions[key], targets[key] = q, target
+            continue
+        crit, gold = dict(q["criteria"]), list(q["criteria"])[gi]
+        nones = [o for o in NONE_OPTIONS if o[0] not in crit]
+        extra = [k for k in DISTRACTORS if k not in crit]
+        r = rng.random()
+        if r < p_none and len(crit) > 2 and nones:
+            nk, nd = rng.choice(nones)
+            crit.pop(gold)
+            crit[nk], gold = nd, nk
+        elif p_none <= r < p_none + p_none_distract and len(crit) < 255 and nones:
+            nk, nd = rng.choice(nones)
+            crit[nk] = nd
+        elif p_none + p_none_distract <= r < p_none + p_none_distract + p_distract and len(crit) < 255 and extra:
+            k = rng.choice(extra)
+            crit[k] = DISTRACTORS[k]
+        questions[key], targets[key] = _choice(q, crit, gold, rng)
+    return {**rec, "request": {**rec["request"], "questions": questions}, "targets": targets}
+
+
+def none_pair(rec: dict, rng: random.Random) -> list[dict]:
+    """Kev's minimal pair: one eligible Choice (>= 3 options, one-hot target) asked twice with the same added none
+    option and option order, once with the gold present (none is wrong) and once with it removed (none is right).
+    [] when no question is eligible."""
+    eligible = [k for k, q in rec["request"]["questions"].items()
+                if q["type"] == "choice" and len(q["criteria"]) >= 3 and _hard_gold(rec["targets"][k]) is not None]
+    if not eligible:
+        return []
+    key = rng.choice(eligible)
+    q = rec["request"]["questions"][key]
+    gold = list(q["criteria"])[_hard_gold(rec["targets"][key])]
+    nk, nd = rng.choice([o for o in NONE_OPTIONS if o[0] not in q["criteria"]] or [("none_of_these", None)])
+    keys = list(q["criteria"]) + [nk]
+    rng.shuffle(keys)
+    crit = {k: (nd if k == nk else q["criteria"][k]) for k in keys}
+    absent = {k: v for k, v in crit.items() if k != gold}
+    pair = []
+    for tag, c, answer in (("present", crit, gold), ("absent", absent, nk)):
+        pair.append({**rec, "id": f"{rec['id']}#none-{tag}",
+                     "request": {"state": rec["request"]["state"], "questions": {key: {**q, "criteria": c}}},
+                     "targets": {key: one_hot(len(c), list(c).index(answer))}})
+    return pair
+
+
 def pick(rng: random.Random, templates: list[str], **fields) -> str:
     """A random paraphrase of an instruction."""
     return rng.choice(templates).format(**fields)

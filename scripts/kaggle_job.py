@@ -9,10 +9,12 @@ Current job: Phase 4 training (docs/designs/pointwise-phase4-plan.md).
 1. Build the training data from pinned sources into /tmp (not saved as output).
    Remove Kaggle's preinstalled torchao and check that LoRA can be applied
    (preflight), so an environment problem fails in seconds, not mid-launch.
-2. Train on every visible GPU with torchrun: a fresh 2-epoch run that checks dev
-   loss every 30 minutes and evaluates the best weights (Phase 4 run 2; run 1
-   overfitted over ~4 epochs). It doesn't search /kaggle/input, so it can't
-   resume run 1's checkpoint by accident.
+   Run 3 caps each public source at 2,000 train records (Kev's balanced recipe;
+   docs/designs/pointwise-phase4-review.md).
+2. Train on every visible GPU with torchrun: a fresh 2-epoch run with Kev's option
+   augmentation, lr 1e-4 and weight decay 0.01, checking dev loss every 15 minutes
+   and evaluating the best weights (Phase 4 run 3). It doesn't search
+   /kaggle/input, so it can't resume an earlier run's checkpoint by accident.
 3. If training fails in its first 20 minutes (almost always out of memory on the
    largest batch, which runs first), retry once with half the token budget.
 
@@ -26,11 +28,13 @@ import subprocess
 import sys
 import time
 
-DATA_DIR = "/tmp/pointwise-data"
+DATA_DIR = "/tmp/pointwise-data-run3"
 TOKEN_BUDGET = 4096
 EARLY_FAILURE_MINUTES = 20
 TRAIN_ARGS = [
-    "--epochs", "2",  # ~4,900 steps, ~5.5h on 2x T4; sizes the LR schedule and stops there
+    "--epochs", "2",  # sizes the LR schedule and stops there
+    "--augment",
+    "--checkpoint-minutes", "15",  # the run is ~1h, so 30 would give only one dev check
     "--max-hours", "10.5",  # safety: Kaggle stops sessions at 12h and then keeps no output
 ]
 
@@ -69,7 +73,7 @@ def main() -> None:
     env = dict(os.environ)
     env.pop("CUDA_VISIBLE_DEVICES", None)  # the notebook pins GPU 0; training uses all of them
     env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-    if run([sys.executable, "-m", "src.pointwise.data.build", "--out", DATA_DIR], env):
+    if run([sys.executable, "-m", "src.pointwise.data.build", "--out", DATA_DIR, "--train-cap", "2000"], env):
         sys.exit("data build failed")
     # Kaggle's image ships torchao 0.10; peft 0.21 raises on any torchao below 0.16
     # while applying LoRA (2026-10-06 session 1 failed this way). Pointwise doesn't

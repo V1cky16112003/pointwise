@@ -42,6 +42,7 @@ import torch
 import torch.distributed as dist
 
 from src.pointwise import metrics as M
+from src.pointwise.data import records as R
 from src.pointwise.encoding import EncodedRequest, encode_request
 from src.pointwise.model import DecisionModel
 from src.pointwise.schema import SystemOneRequest
@@ -70,8 +71,12 @@ def parse_args(argv=None):
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--model", default=MODEL_NAME)
     p.add_argument("--lora-r", type=int, default=16)
-    p.add_argument("--lr", type=float, default=2e-4)
-    p.add_argument("--head-lr", type=float, default=1e-3)
+    p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--head-lr", type=float, default=1e-4)
+    p.add_argument("--weight-decay", type=float, default=0.01)
+    p.add_argument("--augment", action="store_true",
+                   help="Kev's option augmentation on train records: none option, distractors, none pairs")
+    p.add_argument("--p-none-pair", type=float, default=0.25, help="with --augment: chance a record adds a none pair")
     p.add_argument("--brier-weight", type=float, default=0.0)
     p.add_argument("--token-budget", type=int, default=4096, help="padded tokens per batch per GPU")
     p.add_argument("--warmup", type=int, default=200)
@@ -96,16 +101,28 @@ def parse_args(argv=None):
 # --- data ------------------------------------------------------------------------
 
 
-def load_examples(path: Path, tokenizer, args, limit: int | None = None) -> tuple[list[Example], dict]:
+def augmented(rec: dict, seed: int, p_none_pair: float) -> list[dict]:
+    """The record after Kev's augmentation, plus its none pair with probability p_none_pair.
+    shortcut: drawn once per run, not per epoch as Kev does; redraw per epoch if 2 epochs overfit the augmentation."""
+    rng = random.Random(f"{seed}:{rec['id']}")
+    out = [R.augment(rec, rng)]
+    if rng.random() < p_none_pair:
+        out += R.none_pair(rec, rng)
+    return out
+
+
+def load_examples(path: Path, tokenizer, args, limit: int | None = None, augment: bool = False) -> tuple[list[Example], dict]:
     """Encode records and drop any that don't fit the training context. Records
     are dropped whole rather than truncated: cutting a state could cut the
     evidence a label depends on."""
     examples, dropped = [], {}
     with path.open(encoding="utf-8") as f:
-        for n, line in enumerate(f):
-            if limit is not None and n >= limit:
-                break
-            rec = json.loads(line)
+        lines = [line for n, line in enumerate(f) if limit is None or n < limit]
+    for line in lines:
+        recs = [json.loads(line)]
+        if augment:
+            recs = augmented(recs[0], args.seed, args.p_none_pair)
+        for rec in recs:
             request = SystemOneRequest.model_validate(rec["request"])
             encoded = encode_request(tokenizer, request)
             state = len(encoded.state_ids)
@@ -382,13 +399,13 @@ def main(argv=None) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     model = build_model(args, device)
     tokenizer = model.tokenizer
-    train, dropped = load_examples(args.data_dir / "train.jsonl", tokenizer, args, args.limit_train)
+    train, dropped = load_examples(args.data_dir / "train.jsonl", tokenizer, args, args.limit_train, args.augment)
     say(f"train examples {len(train)}, dropped for context {dropped}, world {world}, setup {time.time() - started:.0f}s")
 
     lora_params = [p for p in model.backbone.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
         [{"params": lora_params, "lr": args.lr}, {"params": model.head.parameters(), "lr": args.head_lr}],
-        weight_decay=0.0,
+        weight_decay=args.weight_decay,
     )
     for group in optimizer.param_groups:
         group["base_lr"] = group["lr"]

@@ -281,3 +281,100 @@ def test_build_report_gate_shape(built):
     _, report = built
     assert set(report["gate"]) >= {"train_questions", "enough_questions", "gold_position_unbiased", "pass"}
     assert report["gate"]["enough_questions"]  # small builds don't apply the size gate
+
+
+def test_train_cap_limits_each_public_source_and_keeps_policies():
+    out, report = B.build(seed=0, limit_rows=40, load_rows=fake_load_rows, banking=BANKING, train_cap=5)
+    counts = {}
+    for r in out["train"]:
+        counts[r["source"]] = counts.get(r["source"], 0) + 1
+    # arc_easy and arc_challenge share the "arc" source name, so arc may hold two capped sources
+    assert all(n <= (10 if s == "arc" else 5) for s, n in counts.items() if s != "policies")
+    assert counts["policies"] > 5
+    assert report["train_cap"] == 5 and report["gate"]["pass"]
+
+
+# --- Kev's option augmentation ----------------------------------------------------
+
+def _choice_rec(n_options=4, gold=1):
+    keys = [f"opt{i}" for i in range(n_options)]
+    return {"id": "t/train/0", "source": "t", "split": "train",
+            "request": {"state": "s", "questions": {"q": {"type": "choice", "instructions": "pick", "criteria": {k: None for k in keys}},
+                                                    "yn": {"type": "noul", "instructions": "yes?"}}},
+            "targets": {"q": R.one_hot(n_options, gold), "yn": [0.0, 1.0]}}
+
+
+def _aug_gold(rec, key="q"):
+    return list(rec["request"]["questions"][key]["criteria"])[rec["targets"][key].index(1.0)]
+
+
+class _Fixed(random.Random):
+    """random() always returns r, so each augmentation branch can be forced."""
+    def __init__(self, r):
+        super().__init__(0)
+        self.r = r
+
+    def random(self):
+        return self.r
+
+
+def test_augment_none_option_replaces_gold_and_becomes_answer():
+    rec = _choice_rec()
+    out = R.augment(rec, _Fixed(0.05))
+    crit = out["request"]["questions"]["q"]["criteria"]
+    assert "opt1" not in crit and len(crit) == 4
+    assert _aug_gold(out) in {k for k, _ in R.NONE_OPTIONS}
+    R.validate(out)
+
+
+def test_augment_none_distractor_keeps_aug_gold():
+    out = R.augment(_choice_rec(), _Fixed(0.15))
+    crit = out["request"]["questions"]["q"]["criteria"]
+    assert len(crit) == 5 and _aug_gold(out) == "opt1"
+    assert set(crit) - {f"opt{i}" for i in range(4)} <= {k for k, _ in R.NONE_OPTIONS}
+    R.validate(out)
+
+
+def test_augment_distractor_adds_irrelevant_option_keeps_aug_gold():
+    out = R.augment(_choice_rec(), _Fixed(0.30))
+    crit = out["request"]["questions"]["q"]["criteria"]
+    assert len(crit) == 5 and _aug_gold(out) == "opt1"
+    assert (set(crit) - {f"opt{i}" for i in range(4)}) <= set(R.DISTRACTORS)
+    R.validate(out)
+
+
+def test_augment_leaves_noul_soft_targets_and_two_option_none_alone():
+    rec = _choice_rec(n_options=2)
+    rec["targets"]["yn"] = [0.0, 1.0]
+    out = R.augment(rec, _Fixed(0.05))  # none-replaces-gold needs > 2 options
+    assert set(out["request"]["questions"]["q"]["criteria"]) == {"opt0", "opt1"} and _aug_gold(out) == "opt1"
+    assert out["request"]["questions"]["yn"] == rec["request"]["questions"]["yn"]
+    soft = _choice_rec()
+    soft["targets"]["q"] = [0.25, 0.25, 0.25, 0.25]
+    assert R.augment(soft, _Fixed(0.05))["request"]["questions"]["q"] == soft["request"]["questions"]["q"]
+
+
+def test_none_pair_differs_only_in_gold_presence():
+    present, absent = R.none_pair(_choice_rec(), random.Random(3))
+    pc, ac = present["request"]["questions"]["q"]["criteria"], absent["request"]["questions"]["q"]["criteria"]
+    assert _aug_gold(present) == "opt1" and "opt1" not in ac
+    assert list(ac) == [k for k in pc if k != "opt1"]  # same order, gold removed
+    assert _aug_gold(absent) in {k for k, _ in R.NONE_OPTIONS} and _aug_gold(absent) in pc
+    assert present["id"] != absent["id"]
+    for r in (present, absent):
+        R.validate(r)
+    assert R.none_pair(_choice_rec(n_options=2), random.Random(0)) == []
+
+
+def test_position_gate_allows_chance_on_small_sources_but_not_bias():
+    def report_for(n, first):
+        recs = []
+        for i in range(n):
+            gold = 0 if i < first else 1 + i % 2
+            recs.append({"id": f"x/train/{i}", "source": "x", "split": "train",
+                         "request": {"state": "s", "questions": {"q": {"type": "choice", "instructions": "i", "criteria": {"a": None, "b": None, "c": None}}}},
+                         "targets": {"q": R.one_hot(3, gold)}})
+        return B.make_report({"train": recs}, {"clinc_excluded_intent_options": 0}, full_size=False)["gate"]
+    assert report_for(2000, 620)["gold_position_unbiased"]  # 0.310 vs 0.333: 2.2 SE, chance
+    assert not report_for(2000, 560)["gold_position_unbiased"]  # 0.280: 5 SE, a bias
+    assert not report_for(30000, 9300)["gold_position_unbiased"]  # 0.310 at full size: still flagged

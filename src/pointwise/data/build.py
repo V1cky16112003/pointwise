@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import random
 import re
 from pathlib import Path
@@ -25,7 +26,8 @@ from src.pointwise.data import sources as S
 from src.pointwise.data.policies import policy_records
 
 GATE_MIN_TRAIN_QUESTIONS = 200_000
-# A source's gold-first rate may differ from the random expectation by this much.
+# A source's gold-first rate may differ from the random expectation by this much,
+# or by 3 standard errors if more: a capped source (2,000 records) misses 0.02 by chance.
 GATE_POSITION_TOLERANCE = 0.02
 EVAL_CAP = 1000  # records per source per dev/test split, and per held-out source
 POLICY_RECORDS = {"train": 15_000, "dev": 500, "test": 500}
@@ -80,8 +82,11 @@ def _renumber(recs: list[dict], split: str) -> list[dict]:
     return recs
 
 
-def build(seed: int, limit_rows: int | None, load_rows=S.load_rows, banking=None) -> tuple[dict, dict]:
-    """-> ({split: records}, report). load_rows and banking are injectable for tests."""
+def build(seed: int, limit_rows: int | None, load_rows=S.load_rows, banking=None,
+          train_cap: int | None = None) -> tuple[dict, dict]:
+    """-> ({split: records}, report). load_rows and banking are injectable for tests.
+    train_cap: at most this many train records per public source (Kev's balanced recipe);
+    policies keep their own count."""
     from src.config import load_task_config
 
     config = load_task_config()
@@ -100,7 +105,7 @@ def build(seed: int, limit_rows: int | None, load_rows=S.load_rows, banking=None
             clinc_excluded = S.clinc_excluded(names, banking["labels"])
             kwargs["excluded"] = clinc_excluded
         rows = _sample(rows, cap, _rng(name, "rows", seed), limit_rows)
-        out["train"] += convert(rows, names, _rng(name, "train", seed), "train", **kwargs, **train_kwargs)
+        out["train"] += convert(rows, names, _rng(name, "train", seed), "train", **kwargs, **train_kwargs)[:train_cap]
 
         eval_rows = []
         for split in eval_splits:
@@ -127,7 +132,9 @@ def build(seed: int, limit_rows: int | None, load_rows=S.load_rows, banking=None
         for rec in recs:
             rec.pop("_text", None)
             R.validate(rec)
-    return out, make_report(out, checks, full_size=limit_rows is None)
+    report = make_report(out, checks, full_size=limit_rows is None and train_cap is None)
+    report["train_cap"] = train_cap
+    return out, report
 
 
 def leakage_checks(out: dict, banking_texts: list[str], clinc_excluded: frozenset) -> dict:
@@ -174,7 +181,8 @@ def make_report(out: dict, checks: dict, full_size: bool) -> dict:
         source
         for source, s in labels["train"].items()
         if s.get("choice_total", 0) >= 1000
-        and abs(s["gold_first_rate"] - s["expected_first_rate"]) > GATE_POSITION_TOLERANCE
+        and abs(s["gold_first_rate"] - s["expected_first_rate"])
+        > max(GATE_POSITION_TOLERANCE, 3 * math.sqrt(s["expected_first_rate"] * (1 - s["expected_first_rate"]) / s["choice_total"]))
     )
     gate = {
         "train_questions": train_questions,
@@ -198,9 +206,10 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=Path("data/pointwise"))
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--limit-rows", type=int, default=None, help="rows per source split, for a quick check")
+    parser.add_argument("--train-cap", type=int, default=None, help="train records per public source (run 3: 2000)")
     args = parser.parse_args()
 
-    out, report = build(args.seed, args.limit_rows)
+    out, report = build(args.seed, args.limit_rows, train_cap=args.train_cap)
     args.out.mkdir(parents=True, exist_ok=True)
     for split, recs in out.items():
         with (args.out / f"{split}.jsonl").open("w", encoding="utf-8") as f:
