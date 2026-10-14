@@ -24,6 +24,7 @@ from pathlib import Path
 from src.pointwise.data import records as R
 from src.pointwise.data import sources as S
 from src.pointwise.data.policies import policy_records
+from src.pointwise.data.rules import rule_records
 
 GATE_MIN_TRAIN_QUESTIONS = 200_000
 # A source's gold-first rate may differ from the random expectation by this much,
@@ -117,6 +118,8 @@ def build(seed: int, limit_rows: int | None, load_rows=S.load_rows, banking=None
     for split, n in POLICY_RECORDS.items():
         n = max(1, int(n * scale))
         out[split] += policy_records(seed, split, min(n, train_cap) if split == "train" and train_cap else n)
+    # Kev's rule structures: train only, so dev/test/heldout and the gate stay comparable with run 4
+    out["train"] += rule_records(seed, train_cap)
 
     out["heldout"] += S.banking77(banking["test"], banking["labels"], _rng("banking77", seed), "heldout")
     for name, (convert, split) in HELDOUT_SOURCES.items():

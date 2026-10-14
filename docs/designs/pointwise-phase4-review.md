@@ -70,3 +70,31 @@ One change set, matching Kev's base recipe, on the same 2 epochs and the same ga
 The smaller data set also cuts the run from ~5.3 to well under 1 GPU-hour, so a
 second seed fits the budget. Success = pooled OOD ECE ≤ 0.05 with no source's
 accuracy below run 2's by more than 3 points.
+
+## Kev's rule-structure records (read 2026-10-14, kev main @ 0a6d3fa)
+
+Source: `kev/composition.py` (generator), called from `kev/study_v3.py` with the
+`decision-v8` manifest settings: `random_structures` 60, `groups_per_structure` 8,
+train render styles 0, 1, 3, 4. One group per structure goes to calibration, so training
+gets 60 × 7 groups × 4 records = **1,680**.
+
+- **Structures:** 60 distinct random rule trees over `and`, `or`, `not`, `unless` and
+  `if/else`, depth 2–3, 2–4 leaves, negation in ~60%. Trees equal (after commutative
+  sorting and De Morgan) to Kev's 8 held-out eval shapes are excluded.
+- **Leaves (atoms):** numeric thresholds (`<`, `≤`, `>`, `≥`, `=`, a 10-wide range),
+  "same person" matches, elapsed days between two dates, and yes/no flags, over generic
+  nouns ("request value", "shipment verified").
+- **Record:** state = {policy text ("Approve exactly when <rule>. Otherwise deny."),
+  case facts as sentences}; one choice question, accept / reject, options shuffled.
+  The rule is rendered in one of four surface styles (logic, lists, prose, bracketed).
+- **Groups are minimal pairs:** each group is 4 records. A *relevant* pair changes one
+  fact and the decision flips; an *irrelevant* pair changes only a "routing reference"
+  that the policy says to ignore, and the decision stays the same.
+- **Label balance:** not forced; it follows the sampled facts.
+
+**How ours differ.** `policies.py` writes flat `and`/`or` rules over 2–3 conditions and an
+ordered first-match rule list, as questions about one business object. It has no
+negation, exceptions or nesting, no minimal pairs and no ignore-this-field nuisance. So
+Kev's records are not a duplicate: they add rule *structure* and counterfactual pairs.
+Kev's atoms include date arithmetic, which our generator deliberately avoids; the port
+keeps it to stay faithful to Kev.

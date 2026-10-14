@@ -379,3 +379,36 @@ def test_position_gate_allows_chance_on_small_sources_but_not_bias():
     assert report_for(2000, 620)["gold_position_unbiased"]  # 0.310 vs 0.333: 2.2 SE, chance
     assert not report_for(2000, 560)["gold_position_unbiased"]  # 0.280: 5 SE, a bias
     assert not report_for(30000, 9300)["gold_position_unbiased"]  # 0.310 at full size: still flagged
+
+
+def test_rule_records_are_valid_minimal_pairs_with_unbiased_gold():
+    from src.pointwise.data import rules
+    recs = rules.rule_records(seed=0)
+    assert len(recs) == rules.STRUCTURES * rules.GROUPS_PER_STRUCTURE * 4 == 1680
+    for rec in recs:
+        R.validate(rec)
+    labels = [r["request"]["questions"]["decision"]["criteria"] for r in recs]
+    gold = [list(c)[t["decision"].index(1.0)] for c, t in zip(labels, (r["targets"] for r in recs))]
+    for i in range(0, len(recs), 4):
+        a, b, c, d = (recs[i + j]["request"]["state"] for j in range(4))
+        assert a["policy"] == b["policy"] == c["policy"] == d["policy"]
+        assert gold[i] != gold[i + 1]  # relevant edit flips the decision
+        assert gold[i + 2] == gold[i + 3] and c["case"] != d["case"]  # routing reference is ignored
+    first = sum(r["targets"]["decision"][0] for r in recs) / len(recs)
+    assert abs(first - 0.5) < 0.05  # gold position is unbiased
+    assert len(rules.rule_records(seed=0, n=100)) == 100
+    assert len(rules.rule_records(seed=0, n=7)) == 4
+    assert rules.rule_records(seed=0) == recs  # deterministic
+
+
+def test_rule_trees_avoid_kev_heldout_shapes():
+    from src.pointwise.data import rules
+    trees = rules.sample_trees(rules.STRUCTURES, "x")
+    assert len({rules.canonical(t) for t in trees}) == len(trees)
+    assert not any(rules.structure_keys(t) & rules.EXCLUDED_KEYS for t in trees)
+
+
+def test_train_cap_applies_to_rules_and_rules_stay_in_train():
+    out, _ = B.build(seed=0, limit_rows=40, load_rows=fake_load_rows, banking=BANKING, train_cap=5)
+    assert sum(r["source"] == "rules" for r in out["train"]) == 4  # cap 5 rounds down to one whole group
+    assert not any(r["source"] == "rules" for split in ("dev", "test", "heldout") for r in out[split])
