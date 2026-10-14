@@ -169,3 +169,33 @@ attached as input, **Save & Run All**.
   - **Proposed next change (not started):** cap policies at 2,000 records as well, keeping
     everything else from run 3. That brings the mix close to Kev's balance and the run to
     under an hour.
+- **Run 4** (2026-10-14, Kaggle `mini-jev-phase-0` session 358320099, commit 619c296, 2×T4): run 3
+  with policy train records also capped at 2,000. Policies drop from 67% to 21% of train
+  questions (7,021 of 33,136), Kev's balance. 2 epochs = 766 steps, 0.85 h of training,
+  ~1.0 GPU-hour of quota, finished without error.
+  - **Dev curve** (scaled NLL): 0.463 → 0.403 → 0.390 → **0.3856 at step 766** (still falling at
+    the end). Dev accuracy 0.848, ECE 0.022, T = **1.41**.
+  - **Held-out** (accuracy / ECE after T), run 3 then run 2 in brackets:
+
+    | Source | Run 4 | Run 3 | Run 2 |
+    |---|---|---|---|
+    | QNLI | 0.812 / 0.072 | 0.818 / 0.082 | 0.866 / 0.138 |
+    | PAWS | 0.736 / 0.144 | 0.750 / 0.133 | 0.654 / 0.223 |
+    | Emotion | 0.522 / 0.164 | 0.492 / 0.159 | 0.504 / 0.099 |
+    | TweetEval | 0.696 / 0.042 | 0.652 / 0.038 | 0.672 / 0.064 |
+    | Banking77 (zero-shot) | 0.632 / 0.105 | 0.626 / 0.113 | 0.626 / 0.135 |
+    | **Pooled OOD ECE** | **0.063** | 0.056 | 0.080 |
+
+  - PAWS non-paraphrases called paraphrase: 125 of 299 (run 3: 118, run 2: 169); paraphrases
+    missed 7 of 201.
+  - **Gate: FAIL.** ECE 0.063 > 0.05, and worse than run 3. The regression guard also fails:
+    QNLI is 5.4 points below run 2 (limit 3). Emotion (+1.8), TweetEval (+2.4) and PAWS
+    (+8.2) pass it.
+  - **What this rules out:** the policy imbalance was not what cost QNLI. Rebalancing moved
+    QNLI by −0.6 points and left calibration about where it was; Emotion's ECE stayed at 0.16.
+    With fewer records the run had half as many steps (766 vs 1,622), and dev NLL was still
+    falling at the end, so this run may also be under-trained.
+  - **Proposed next step (not started):** stop tuning and go to Phase 5 with the gate FAIL
+    noted, using run 3 (best pooled ECE, 0.056) as the Phase 4 model. The remaining Kev
+    ingredient, its 1,680 rule-structure records, targets rule-following rather than the
+    QNLI and Emotion gaps, so it is unlikely to close the gate on its own.
