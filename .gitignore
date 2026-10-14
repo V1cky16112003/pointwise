@@ -31,3 +31,6 @@ venv/
 # Pointwise Phase 3 data (rebuilt from pinned sources by src/pointwise/data/build.py)
 data/pointwise/
 data/minijev/
+
+# Phase 5 downloaded Kaggle outputs (large, regenerable)
+artifacts/
