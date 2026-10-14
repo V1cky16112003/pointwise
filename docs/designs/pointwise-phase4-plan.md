@@ -140,7 +140,8 @@ attached as input, **Save & Run All**.
     *worse* after scaling (0.094 → 0.138): T > 1 makes an already-accurate source
     underconfident. One global temperature fitted on dev can't fix miscalibration
     that points in different directions on different held-out sources.
-  - **Proposed next change (not started):** train with a larger Brier weight (the
+  - ~~**Proposed next change (not started):** train with a larger Brier weight (the
     Brier variant set aside in the plan). Brier penalises confident mistakes boundedly
     and tends to give better out-of-distribution calibration than log loss alone. Keep
-    2 epochs and the same gate.
+    2 epochs and the same gate.~~ Withdrawn 2026-10-14: Kev recorded CE + Brier as a
+    negative result. See `pointwise-phase4-review.md` for the revised plan.
