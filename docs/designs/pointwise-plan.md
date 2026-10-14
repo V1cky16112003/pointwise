@@ -130,6 +130,32 @@ true distribution, and why one-hot training still ends up overconfident.
 - **Gate:** report shows where Pointwise wins and loses, with bootstrap CIs,
   including against the no-training baseline.
 
+**Phase 5 log**
+- **2026-10-14, prepared, not yet run.** Model under test is Phase 4 run 3 (Kaggle `mini-jev-phase-0`
+  version 12, session 358167213, best step 1541, T = 1.52). Its held-out predictions and weights were saved
+  locally (`artifacts/run3/`, git-ignored) and `score_rows` reproduces the logged per-source numbers.
+  - Built: `src/pointwise/baselines.py` (option log-likelihood scoring for a plain causal LM, with the prompt
+    cache shared across options), `src/pointwise/compare.py` (arm alignment, paired bootstrap resampled inside
+    each source, reliability bins, flip rate), `scripts/phase5_eval.py` (all arms on one T4),
+    `scripts/phase5_report.py` (tables, plots, `reports/pointwise-results.md`), and `scripts/kaggle_job.py`
+    now runs that eval, not training. `reports/run3_sample_ids.json` pins run 3's 1,500 dev and 2,500
+    held-out ids; the job asserts it rebuilds exactly them, so every arm answers the same questions.
+  - Arms: Pointwise run 3; Qwen3-1.7B-Base with no training; Qwen2.5-1.5B-Instruct with and without the
+    Phase 0 Banking77 LoRA (Banking77 read through the specialist's own prompt via `src/readout.py`, other
+    sources through the plain-text prompt). Each arm's T is fitted on its own dev rows, never on held-out.
+  - Tested without a GPU: option scoring equals scoring each full sequence alone; flip-rate bookkeeping;
+    bootstrap; arm alignment; the three causal arms end to end on Qwen3-0.6B / Qwen2.5-0.5B with a
+    zero-initialised adapter (which reproduces the base arm exactly). Not tested: the real 1.7B / 1.5B models,
+    and Pointwise's flip-rate and latency stages, which only ran partially on CPU (memory-bound on an 8 GB laptop).
+  - **Kev not run.** Kev's model card lists Banking77 among its training sets, so Kev's Banking77 number would be
+    in-domain, not zero-shot. QNLI, PAWS and Emotion are listed as never trained on. Kev-0.8B uses a
+    Qwen3.5 (Gated DeltaNet) base and its own package, so it needs a separate environment and a T4 check.
+    Left for a decision; see the hand-off.
+  - Estimated cost, one T4 session, about 1-1.5 h wall (~1.5-2 GPU-hours of quota, an estimate from the Phase 0b
+    per-example timings, not a measurement): data rebuild and ~10 GB of model downloads, then ~7,000 plain-text
+    questions per causal arm, Banking77 read-out for two arms, flip rates and latency.
+    The job saves after each arm, so a late failure keeps the earlier ones.
+
 ## Phase 6 — Serving (≈2 days)
 - Extend `src/serve.py` with `POST /v1/systemone`, request/response exactly as
   `schema.py` (TypeSafe's contract), so a Jev or Kev client works unchanged.
