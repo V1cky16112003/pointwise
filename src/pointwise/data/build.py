@@ -85,8 +85,7 @@ def _renumber(recs: list[dict], split: str) -> list[dict]:
 def build(seed: int, limit_rows: int | None, load_rows=S.load_rows, banking=None,
           train_cap: int | None = None) -> tuple[dict, dict]:
     """-> ({split: records}, report). load_rows and banking are injectable for tests.
-    train_cap: at most this many train records per public source (Kev's balanced recipe);
-    policies keep their own count."""
+    train_cap: at most this many train records per source, policies included (Kev's balanced recipe)."""
     from src.config import load_task_config
 
     config = load_task_config()
@@ -116,7 +115,8 @@ def build(seed: int, limit_rows: int | None, load_rows=S.load_rows, banking=None
 
     scale = 1 if limit_rows is None else min(1.0, limit_rows / 1000)
     for split, n in POLICY_RECORDS.items():
-        out[split] += policy_records(seed, split, max(1, int(n * scale)))
+        n = max(1, int(n * scale))
+        out[split] += policy_records(seed, split, min(n, train_cap) if split == "train" and train_cap else n)
 
     out["heldout"] += S.banking77(banking["test"], banking["labels"], _rng("banking77", seed), "heldout")
     for name, (convert, split) in HELDOUT_SOURCES.items():

@@ -28,7 +28,7 @@ import subprocess
 import sys
 import time
 
-DATA_DIR = "/tmp/pointwise-data-run3"
+DATA_DIR = "/tmp/pointwise-data-run4"
 TOKEN_BUDGET = 4096
 EARLY_FAILURE_MINUTES = 20
 TRAIN_ARGS = [

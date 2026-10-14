@@ -283,14 +283,15 @@ def test_build_report_gate_shape(built):
     assert report["gate"]["enough_questions"]  # small builds don't apply the size gate
 
 
-def test_train_cap_limits_each_public_source_and_keeps_policies():
+def test_train_cap_limits_every_source_including_policies():
     out, report = B.build(seed=0, limit_rows=40, load_rows=fake_load_rows, banking=BANKING, train_cap=5)
     counts = {}
     for r in out["train"]:
         counts[r["source"]] = counts.get(r["source"], 0) + 1
     # arc_easy and arc_challenge share the "arc" source name, so arc may hold two capped sources
-    assert all(n <= (10 if s == "arc" else 5) for s, n in counts.items() if s != "policies")
-    assert counts["policies"] > 5
+    assert all(n <= (10 if s == "arc" else 5) for s, n in counts.items())
+    assert counts["policies"] == 5
+    assert sum(r["source"] == "policies" for r in out["dev"]) > 5  # eval splits stay uncapped
     assert report["train_cap"] == 5 and report["gate"]["pass"]
 
 
