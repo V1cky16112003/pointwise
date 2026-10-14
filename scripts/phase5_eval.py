@@ -27,7 +27,7 @@ import transformers
 from src.config import load_task_config
 from src.pointwise import baselines as B
 from src.pointwise import train as T
-from src.pointwise.schema import SystemOneRequest, question_options
+from src.pointwise.schema import SystemOneRequest
 from src.readout import LabelScorer
 
 QWEN3 = "Qwen/Qwen3-1.7B-Base"
