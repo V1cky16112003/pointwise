@@ -149,10 +149,12 @@ def main() -> None:
     plot_reliability(stats, args.output_dir / "reliability.png")
     plot_risk_coverage(stats, args.output_dir / "risk_coverage.png")
 
-    n_dev = len(next(iter(arms.values()))["dev"])
+    n_dev = {arm: len(v["dev"]) for arm, v in arms.items()}
     md = ["# Pointwise Phase 5 results", "",
           "All arms score the same 2,500 held-out questions (500 per source) that Phase 4 run 3 used. Temperature T is fitted "
-          f"per arm on that arm's own dev rows ({n_dev:,} questions from 1,500 dev records), never on held-out. Banking77 is zero-shot "
+          f"per arm on that arm's own dev rows (dev questions answered per arm: "
+          + ", ".join(f"{LABEL[a]} {n:,}" for a, n in n_dev.items()) + "; the baselines skip the score-type dev questions "
+          "(policies, SST-5, Yelp) that Pointwise answers, and Pointwise keeps its full dev set so its T is run 3's), never on held-out. Banking77 is zero-shot "
           "for Pointwise and Qwen3; it is in-domain for the Banking77 LoRA arm and for Kev (Kev's model card lists Banking77 among "
           "its training sets). Sanity check: the LoRA arm's Banking77 accuracy should be near the Phase 0 read-out's 0.918; if it is "
           "far lower, the scoring path is wrong and nothing below should be trusted.", "",

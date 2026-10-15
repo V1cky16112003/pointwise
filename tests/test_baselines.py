@@ -59,3 +59,12 @@ def test_question_prompt_for_noul_and_choice():
     )
     prompt, cont = B.question_prompt(choice, "q")
     assert cont == [" red", " blue"] and "- red: a colour" in prompt
+
+
+def test_score_record_skips_score_questions_but_keeps_question_indices(model):
+    rec = {"source": "s", "id": "1", "targets": {"a": [1.0, 0.0], "b": [0.0, 1.0]},
+           "request": {"state": "t", "questions": {
+               "a": {"type": "score", "instructions": "Rate", "criteria": ["bad", "good"]},
+               "b": {"type": "noul", "instructions": "Same?"}}}}
+    rows = B.score_record(model, FakeTokenizer(), rec)
+    assert [r["question"] for r in rows] == [1] and len(rows[0]["logits"]) == 2

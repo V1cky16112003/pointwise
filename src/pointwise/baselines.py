@@ -54,10 +54,13 @@ def score_options(model, tokenizer, prompt: str, continuations: list[str]) -> li
 
 
 def score_record(model, tokenizer, rec: dict) -> list[dict]:
-    """One row per question of a Phase 3 record, in the held-out predictions' shape."""
+    """One row per choice/noul question of a Phase 3 record, in the held-out predictions' shape. Score questions
+    (policies, SST-5, Yelp; dev only) are skipped: the report compares arms on the questions they all answer."""
     request = SystemOneRequest.model_validate(rec["request"])
     rows = []
     for k, key in enumerate(request.questions):
+        if request.questions[key].type == "score":
+            continue
         prompt, continuations = question_prompt(request, key)
         rows.append({"source": rec["source"], "id": rec["id"], "question": k,
                      "logits": score_options(model, tokenizer, prompt, continuations),
