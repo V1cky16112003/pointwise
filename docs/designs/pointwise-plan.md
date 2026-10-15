@@ -156,6 +156,18 @@ true distribution, and why one-hot training still ends up overconfident.
     questions per causal arm, Banking77 read-out for two arms, flip rates and latency.
     The job saves after each arm, so a late failure keeps the earlier ones.
 
+- **2026-10-15, run (Kaggle `mini-jev-phase-0` version 17, commit 3c513b7).** Version 16 ran only the Pointwise arm:
+  the baselines raised `NotImplementedError` on the dev set's score questions (policies, SST-5, Yelp; held-out has
+  none). Fix 3c513b7: baselines skip them; each arm fits T on its own dev rows. Version 17 ran all four arms.
+  Reproduction check passed (Pointwise logits equal run 3's saved predictions, T 1.516, pooled OOD ECE 0.0561); the
+  LoRA arm's Banking77 accuracy was 0.932 against Phase 0's 0.918. Kev not run (Banking77 in its training data;
+  separate environment). Results (`reports/pointwise-results.md`): pooled OOD accuracy Pointwise 0.678, Qwen3 base
+  0.640 (+3.8, CI [+1.8, +5.8]), Banking77 LoRA 0.680 (-0.2, CI [-2.1, +1.7], not distinguishable), Qwen2.5-Instruct 0.698 (-2.0, CI
+  [-4.0, -0.1], borderline). Pointwise loses Emotion to the Qwen3 base (-8.0, CI [-11.8, -4.2]). Pooled OOD ECE after T:
+  Pointwise 0.056, Qwen3 base 0.109, LoRA 0.081, Instruct 0.052. Cov@5% pooled OOD 0.004 vs 0.171 for Instruct.
+  Flip rate (Banking77/Emotion/TweetEval) 0.210/0.075/0.045 vs 0.615/0.190/0.070 for the Qwen3 base. Latency T4, k=1/8:
+  196/261 ms vs 223/1,890 ms. Estimated cost was ~1-1.5 h wall (~1.5-2 GPU-h quota); actual not measured here. Kev comparison was not run, so Phase 5's Kev item is open.
+
 ## Phase 6 — Serving (≈2 days)
 - Extend `src/serve.py` with `POST /v1/systemone`, request/response exactly as
   `schema.py` (TypeSafe's contract), so a Jev or Kev client works unchanged.

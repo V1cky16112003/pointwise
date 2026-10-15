@@ -5,8 +5,9 @@ calibrated decisions out, without generating text.** You send a state plus quest
 options, and the model returns a probability for every option. The answer is always one of the declared options,
 so an out-of-schema answer cannot happen.
 
-Status: **Phase 5 (evaluation report) is in progress.** Phases 0–4 are done. The Phase 4 calibration gate
-**failed**, so the numbers below are honest but not yet good. The comparison against baselines is not written yet.
+Status: **Phase 5 (evaluation) is done except the Kev comparison, which was not run**; Phases 0–4 are done and Phase 6 (serving) is next. The Phase 4
+calibration gate **failed** (pooled out-of-domain ECE 0.056 against a 0.05 target) and run 3 was not retuned.
+The full comparison is in `reports/pointwise-results.md`.
 
 ## How it works
 
@@ -54,11 +55,24 @@ conditions: ECE is 0.056 and QNLI accuracy is 4.8 points below run 2. The weak s
 (the model leans on word overlap) and on Emotion. Details and the other runs are in
 `docs/designs/pointwise-phase4-plan.md`.
 
-## What Phase 5 will add
+## Phase 5 results
 
-A report, `reports/pointwise-results.md`, comparing Pointwise with a no-training Qwen3-1.7B baseline, the Phase 0
-Banking77 specialist, and Kev, with paired bootstrap confidence intervals, reliability diagrams, risk–coverage
-curves and a latency table. This section will be replaced by its findings when it is written.
+Run 3 was compared on the same 2,500 held-out questions (500 per source) with a no-training Qwen3-1.7B-Base, the
+Phase 0 Banking77 LoRA specialist (Qwen2.5-1.5B) and its no-training base, using paired bootstrap 95% intervals.
+Full tables, reliability diagrams and risk–coverage curves: `reports/pointwise-results.md`.
+
+- **Wins:** against its own no-training base, pooled out-of-domain accuracy is 0.678 vs 0.640 (+3.8 points, CI
+  [+1.8, +5.8]); Banking77 (zero-shot) +29.8 and TweetEval +20.6. Pooled OOD ECE after temperature is 0.056 vs 0.109
+  for that base, but per source it is mixed and Qwen2.5-Instruct is at 0.052 (point estimates, no intervals). The answer changes when options are shuffled on 21% of Banking77 questions vs 61.5% for the base.
+- **Latency (T4, one ~512-token state):** 196 ms for 1 question and 261 ms for 8, against 223 ms and 1,890 ms for
+  generate-and-parse with the Qwen3 base.
+- **Losses:** Emotion accuracy is 8.0 points *below* the no-training Qwen3 base (CI [-11.8, -4.2]). Against the
+  no-training Qwen2.5-1.5B-Instruct, pooled OOD is -2.0 points (CI [-4.0, -0.1], borderline), with PAWS and Emotion
+  lower. At Cov@5% (the share of questions answerable at <=5% error) Pointwise covers 0.4% pooled OOD vs 17.1% for
+  Qwen2.5-Instruct.
+- **Not distinguishable from noise:** the Banking77 specialist on pooled OOD (-0.2, CI [-2.1, +1.7], so anything from 2 points worse to 1.7 better); the specialist wins Banking77
+  by 30.6 points because that data is in-domain for it.
+- **Not run:** Kev-0.8B/4B (Banking77 is in its training data and it needs a separate environment).
 
 ## Repo layout
 
@@ -67,7 +81,10 @@ src/pointwise/        # the model: schema, encoding, packing, pointer head, trai
 src/pointwise/data/   # training-data converters (public sources, policy generator, rule records)
 src/readout.py        # Phase 0 label read-out for the Banking77 classifier
 src/evaluate_core.py  # shared metrics (ECE, Brier, AURC, coverage), CI-tested without torch
-scripts/kaggle_job.py # the job the Kaggle notebook runs (settings for each training run)
+scripts/kaggle_job.py # the job the Kaggle notebook runs (currently the Phase 5 evaluation)
+scripts/phase5_eval.py   # all arms on one T4; scripts/phase5_report.py builds reports/ from its output
+src/pointwise/baselines.py, compare.py  # no-training scoring; arm alignment and paired bootstrap
+reports/              # pointwise-results.md (python -m scripts.phase5_report --input artifacts/phase5)
 docs/designs/         # plans, run logs and design notes for every phase
 LOGBOOK.md            # chronological record of decisions
 ```
@@ -92,6 +109,6 @@ pytest tests/ -v
 
 - The Phase 4 calibration gate failed (pooled out-of-domain ECE 0.056 against a 0.05 target).
 - Each result is a single run with one seed, and each source has 500 held-out questions, so small gaps between
-  runs may be noise. Phase 5 adds bootstrap confidence intervals.
+  runs may be noise. Phase 5 reports bootstrap confidence intervals; calibration differences (ECE) have none.
 - The `/v1/systemone` endpoint is not served yet (Phase 6); `src/serve.py` still serves the Phase 0 classifier.
 - Training data are public datasets plus rule-generated records. There is no teacher-labelled synthetic set.
