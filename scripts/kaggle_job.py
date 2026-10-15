@@ -9,8 +9,8 @@ Current job: Phase 5 evaluation (docs/designs/pointwise-plan.md). No training.
 1. Rebuild the Phase 3 data into /tmp with run 3's settings (train cap 2,000), which reproduces
    run 3's dev and held-out records; scripts.phase5_eval asserts the ids match reports/run3_sample_ids.json.
    Remove Kaggle's preinstalled torchao and check that LoRA can be applied (preflight).
-2. Find Phase 4 run 3's best weights under /kaggle/input: attach that notebook version (version 12, session
-   358167213) as an input. Only a state.pt at run 3's best step is accepted.
+2. Find Phase 4 run 3's best weights first, before any slow step: any state.pt under /kaggle/input (the
+   pointwise-run3-weights dataset, or notebook version 12, session 358167213). Only one at run 3's best step is accepted.
 3. Run scripts.phase5_eval on one GPU: Pointwise, Qwen3-1.7B-Base with no training, Qwen2.5-1.5B-Instruct with
    and without the Banking77 LoRA, option-shuffle flip rates and latency.
 The Phase 4 training job (runs 2-5) is in git history, last at commit b4c10e7.
@@ -50,13 +50,18 @@ def find_run3_state() -> Path:
     from scripts.phase5_eval import RUN3_BEST_STEP
 
     found = []
-    for path in sorted(Path("/kaggle/input").glob("**/pointwise-train/best/state.pt")):
-        step = torch.load(path, map_location="cpu", weights_only=True)["step"]
+    # Any path: a Kaggle dataset upload flattens folders, so the file may sit at the dataset's root.
+    for path in sorted(Path("/kaggle/input").glob("**/state.pt")):
+        try:
+            step = torch.load(path, map_location="cpu", weights_only=True)["step"]
+        except Exception as e:  # noqa: BLE001  not a Pointwise checkpoint
+            found.append((str(path), repr(e)[:60]))
+            continue
         found.append((str(path), step))
         if step == RUN3_BEST_STEP:
             return path
     sys.exit(f"no run 3 weights (best step {RUN3_BEST_STEP}) under /kaggle/input; found {found}. "
-             "Attach Kaggle notebook version 12 of mini-jev-phase-0 as an input.")
+             "Attach the dataset holding run 3's state.pt (or Kaggle notebook version 12 of mini-jev-phase-0) as an input.")
 
 
 def main() -> None:
@@ -67,14 +72,14 @@ def main() -> None:
 
     env = dict(os.environ)
     env["CUDA_VISIBLE_DEVICES"] = "0"  # one T4: latency is measured on one GPU
+    state = find_run3_state()  # first: a missing input should fail in seconds, not after the data build
+    print("Using run 3 weights:", state, flush=True)
     if run([sys.executable, "-m", "src.pointwise.data.build", "--out", DATA_DIR, "--train-cap", "2000"], env):
         sys.exit("data build failed")
     # Kaggle's image ships torchao 0.10; peft 0.21 raises on any torchao below 0.16 while applying LoRA.
     run([sys.executable, "-m", "pip", "uninstall", "-y", "-q", "torchao"], env)
     if run([sys.executable, "-c", PREFLIGHT], env):
         sys.exit("preflight failed: LoRA can't be applied in this environment")
-    state = find_run3_state()
-    print("Using run 3 weights:", state, flush=True)
     code = run([sys.executable, "-m", "scripts.phase5_eval", "--data-dir", DATA_DIR, "--state", str(state),
                 "--adapter-dir", args.adapter_dir, "--output-dir", args.output_dir], env)
     if code:
