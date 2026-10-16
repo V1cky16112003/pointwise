@@ -36,6 +36,10 @@ MAX_STATE_TOKENS = 32768
 _SPECIAL = re.compile(r"<\|([A-Za-z0-9_]+)\|>")
 
 
+class UnsafeText(ValueError):
+    """Caller text that cannot be tokenised without producing a delimiter token. A server turns it into a 422."""
+
+
 class ContextOverflow(ValueError):
     """The state is longer than the model accepts. A server turns it into a 422."""
 
@@ -71,7 +75,7 @@ def user_tokens(tokenizer, text: str) -> list[int]:
         return ids
     ids = tokenizer(_SPECIAL.sub(r"<¦\1¦>", text), add_special_tokens=False).input_ids
     if not forbidden.isdisjoint(ids):
-        raise ValueError("could not tokenise caller text without delimiter tokens")
+        raise UnsafeText("could not tokenise caller text without delimiter tokens")
     return ids
 
 

@@ -5,7 +5,7 @@ calibrated decisions out, without generating text.** You send a state plus quest
 options, and the model returns a probability for every option. The answer is always one of the declared options,
 so an out-of-schema answer cannot happen.
 
-Status: **Phase 5 (evaluation) is done except the Kev comparison, which was not run**; Phases 0–4 are done and Phase 6 (serving) is next. The Phase 4
+Status: **Phase 5 (evaluation) is done except the Kev comparison, which was not run**; Phases 0–4 are done. **Phase 6 (serving) is built and tested on CPU; its T4 latency numbers are not measured yet.** The Phase 4
 calibration gate **failed** (pooled out-of-domain ECE 0.056 against a 0.05 target) and run 3 was not retuned.
 The full comparison is in `reports/pointwise-results.md`.
 
@@ -81,7 +81,9 @@ src/pointwise/        # the model: schema, encoding, packing, pointer head, trai
 src/pointwise/data/   # training-data converters (public sources, policy generator, rule records)
 src/readout.py        # Phase 0 label read-out for the Banking77 classifier
 src/evaluate_core.py  # shared metrics (ECE, Brier, AURC, coverage), CI-tested without torch
-scripts/kaggle_job.py # the job the Kaggle notebook runs (currently the Phase 5 evaluation)
+scripts/kaggle_job.py # the job the Kaggle notebook runs (currently the Phase 6 latency measurement)
+scripts/phase6_latency.py  # cold / cached / merged serving latency on one T4
+src/serve.py          # FastAPI: /v1/systemone (Pointwise, state-prefix cache) and the Phase 0 /predict
 scripts/phase5_eval.py   # all arms on one T4; scripts/phase5_report.py builds reports/ from its output
 src/pointwise/baselines.py, compare.py  # no-training scoring; arm alignment and paired bootstrap
 reports/              # pointwise-results.md (python -m scripts.phase5_report --input artifacts/phase5)
@@ -110,5 +112,5 @@ pytest tests/ -v
 - The Phase 4 calibration gate failed (pooled out-of-domain ECE 0.056 against a 0.05 target).
 - Each result is a single run with one seed, and each source has 500 held-out questions, so small gaps between
   runs may be noise. Phase 5 reports bootstrap confidence intervals; calibration differences (ECE) have none.
-- The `/v1/systemone` endpoint is not served yet (Phase 6); `src/serve.py` still serves the Phase 0 classifier.
+- `POST /v1/systemone` exists in `src/serve.py` with a state-prefix cache but has not been run on the real model or a GPU; see `docs/designs/pointwise-plan.md`, Phase 6 log.
 - Training data are public datasets plus rule-generated records. There is no teacher-labelled synthetic set.

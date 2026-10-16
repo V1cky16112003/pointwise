@@ -26,6 +26,8 @@ is what the Phase 2 pointer head reads.
 """
 from __future__ import annotations
 
+import hashlib
+from collections import OrderedDict
 from dataclasses import dataclass
 
 import torch
@@ -195,3 +197,57 @@ def row_features(
         feats = _features(out)
         results += [feats[row, : len(q)] for row, q in enumerate(chunk)]
     return results
+
+
+class StateCache:
+    """Serving-side LRU of prefilled state KV caches (Phase 6). A request whose state was seen before skips
+    re-reading it: only the questions run, on top of the stored keys and values (branch_features).
+
+    Keyed by a hash of the state's token ids, so two states share an entry only if the model would read
+    exactly the same tokens. Bounded two ways because a KV cache is big (about 110 KB per token for
+    Qwen3-1.7B in fp16, so a 512-token state is ~57 MB): `max_entries` states and `max_tokens` state tokens
+    in total; the least recently used go first, and a state longer than `max_tokens` is never stored.
+    Not thread-safe: one request at a time (the model is on one GPU anyway), so callers hold a lock.
+    A request grows the stored tensors with torch.cat (new tensors; the stored ones are never written to), so
+    after it the stored references are put back: an entry then holds just its state (see nbytes), with no copy."""
+
+    def __init__(self, max_entries: int = 8, max_tokens: int = 16384):
+        self.max_entries, self.max_tokens = max_entries, max_tokens
+        self.hits = self.misses = 0
+        self._entries: OrderedDict[str, tuple[DynamicCache, int]] = OrderedDict()
+
+    @staticmethod
+    def key(state_ids: list[int]) -> str:
+        return hashlib.sha256(repr(state_ids).encode()).hexdigest()
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+    def features(self, model: PreTrainedModel, packed: Packed) -> list[torch.Tensor]:
+        """Same result as packed_features, reusing or storing the state's cache."""
+        state_ids = packed.ids[: packed.state_len]
+        if packed.state_len > self.max_tokens:  # too big to keep: one packed pass beats prefill + branch and storing nothing
+            self.misses += 1
+            return packed_features(model, packed)
+        key = self.key(state_ids)
+        entry = self._entries.pop(key, None)  # popped, then re-inserted below as the most recent
+        self.hits += entry is not None
+        self.misses += entry is None
+        cache = entry[0] if entry else prefill_state(model, state_ids)
+        self._entries[key] = (cache, packed.state_len)
+        while len(self._entries) > self.max_entries or sum(n for _, n in self._entries.values()) > self.max_tokens:
+            self._entries.popitem(last=False)
+        stored = [(layer.keys, layer.values) for layer in cache.layers]
+        try:
+            return branch_features(model, cache, packed)
+        finally:  # also after an error: the cropped view would keep the question rows' memory alive
+            for layer, (keys, values) in zip(cache.layers, stored):
+                layer.keys, layer.values = keys, values
+
+    def nbytes(self) -> int:
+        """Bytes held by the stored keys and values."""
+        return sum(t.numel() * t.element_size() for cache, _ in self._entries.values()
+                   for layer in cache.layers for t in (layer.keys, layer.values))

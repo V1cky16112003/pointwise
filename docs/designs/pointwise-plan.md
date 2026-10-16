@@ -175,6 +175,31 @@ true distribution, and why one-hot training still ends up overconfident.
 - Optional: vLLM prefix caching path for throughput.
 - **Gate:** p95 latency < 150 ms for 1 state + 8 questions on T4.
 
+**Phase 6 log**
+- **2026-10-16, built and tested, T4 latency not yet measured.** Model is Phase 4 run 3, unchanged (T 1.516 comes from
+  `artifacts/run3/metrics.json` at startup).
+  - Built: `POST /v1/systemone` in `src/serve.py` (body validated by `schema.py`, answers from `DecisionModel.decide`,
+    422 for malformed input or a state over 32,768 tokens, a generic 500 that leaks nothing, 503 if the model is not
+    configured); configured by `POINTWISE_WEIGHTS`, `POINTWISE_METRICS`, `POINTWISE_DEVICE`, `POINTWISE_MERGE_LORA`,
+    `POINTWISE_CACHE_ENTRIES`, `POINTWISE_CACHE_TOKENS`, and the server refuses to start if a file is missing or T is not
+    positive. `/predict` (Phase 0) still works when `ADAPTER_DIR` is set. `StateCache` in `src/pointwise/packing.py`
+    is an LRU of prefilled state KV caches keyed by a hash of the state's token ids, bounded by entries and by total
+    tokens. `scripts/phase6_latency.py` times six configurations; `scripts/kaggle_job.py` now runs it.
+  - Tested without a GPU, in `tests/test_pointwise_serving.py` (tiny random Qwen3, not the real model): cached and
+    uncached probabilities agree (fp32 1e-5; the fp16 tolerance of 5e-3 is an assumption, not a measurement), a smaller
+    request after a larger one is unaffected, stored entries hold only their state (the cropped view used to keep the
+    question rows alive), two states never share an entry, LRU and token-budget eviction, a LoRA-wrapped and a merged
+    backbone, 4xx for malformed input and caller text the encoder refuses, a generic 500 otherwise, startup failures
+    (missing files, T not positive, metrics from other weights, bad cache sizes). Ad hoc and not in the suite: a CPU
+    smoke of the cache and the latency script on Qwen3-0.6B-Base through `train.build_model`, and a deliberate break
+    of the cache key and of the crop, which made the tests fail. Not tested: the real 1.7B model loaded through
+    `load_pointwise`, anything on a GPU, fp16 agreement on real weights, a state near the 32k-token cap (the block
+    mask is O(length^2) and could run out of memory; that would be a 500), a request with hundreds of questions or many long options (only the state length is capped), and the cache at its limits: a state over `POINTWISE_CACHE_TOKENS` (default 16,384) is answered uncached, and a full cache briefly holds one extra state during prefill.
+  - The T4 job also records how far cached and merged answers drift from the uncached, unmerged ones on the real
+    weights (largest probability difference and top-option flips); T 1.516 was fitted on the unmerged model.
+  - Cost of the T4 job: no data build, one model load, six configurations x four k x 65 requests. About 15-20 minutes
+    in one session, so ~0.3 GPU-h of quota (an estimate; not measured).
+
 ## Phase 7 — Stretch
 - RLCD stage 2 with rationales (OpenJev Algorithm 1) on a reasoning task.
 - >255 options via 2-stage Noul scoring → Choice.

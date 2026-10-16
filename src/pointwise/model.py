@@ -22,7 +22,7 @@ import torch.nn as nn
 from transformers import AutoModel, AutoTokenizer, PreTrainedModel
 
 from src.pointwise.encoding import EncodedRequest, encode_request
-from src.pointwise.packing import pack, packed_forward
+from src.pointwise.packing import StateCache, pack, packed_forward
 from src.pointwise.schema import SystemOneRequest, to_answers
 
 HEAD_DIM = 256
@@ -70,33 +70,38 @@ class DecisionModel(nn.Module):
         pad_id = self.tokenizer.pad_token_id
         pad_id = self.tokenizer.eos_token_id if pad_id is None else pad_id
         packs = [pack(e.state_ids, [q.ids for q in e.questions]) for e in batch]
-        logits = []
-        for encoded, features in zip(batch, packed_forward(self.backbone, packs, pad_id)):
-            per_question = []
-            for question, hidden in zip(encoded.questions, features):
-                # The head and the loss stay fp32, even inside fp16 autocast (training).
-                with torch.autocast(hidden.device.type, enabled=False):
-                    hidden = hidden.float()
-                    per_question.append(self.head(hidden[question.decide_offset], hidden[question.option_offsets]))
-            logits.append(per_question)
-        return logits
+        return [self._head_logits(e, f) for e, f in zip(batch, packed_forward(self.backbone, packs, pad_id))]
+
+    def _head_logits(self, encoded: EncodedRequest, features: list[torch.Tensor]) -> list[torch.Tensor]:
+        """The pointer head on one request's per-question backbone features."""
+        per_question = []
+        for question, hidden in zip(encoded.questions, features):
+            # The head and the loss stay fp32, even inside fp16 autocast (training).
+            with torch.autocast(hidden.device.type, enabled=False):
+                hidden = hidden.float()
+                per_question.append(self.head(hidden[question.decide_offset], hidden[question.option_offsets]))
+        return per_question
 
     def question_logits(self, encoded: EncodedRequest) -> list[torch.Tensor]:
         """Option logits per question for one request."""
         return self.forward([encoded])[0]
 
     @torch.no_grad()
-    def probs(self, encoded: EncodedRequest) -> list[list[float]]:
-        return [z.softmax(-1).tolist() for z in self.question_logits(encoded)]
+    def probs(self, encoded: EncodedRequest, state_cache: StateCache | None = None) -> list[list[float]]:
+        """With a `state_cache` the state's KV is reused across requests (serving); the answers are the same."""
+        if state_cache is None:
+            return [z.softmax(-1).tolist() for z in self.question_logits(encoded)]
+        packed = pack(encoded.state_ids, [q.ids for q in encoded.questions])
+        return [z.softmax(-1).tolist() for z in self._head_logits(encoded, state_cache.features(self.backbone, packed))]
 
-    def decide(self, request: SystemOneRequest | dict) -> dict:
+    def decide(self, request: SystemOneRequest | dict, state_cache: StateCache | None = None) -> dict:
         """A /v1/systemone request -> its response body."""
         if isinstance(request, dict):
             request = SystemOneRequest.model_validate(request)
         encoded = self.encode(request)
         return {
             "model": request.model,
-            "answers": to_answers(request, self.probs(encoded)),
+            "answers": to_answers(request, self.probs(encoded, state_cache)),
             "usage": {
                 "input_tokens": len(encoded.state_ids) + sum(len(q.ids) for q in encoded.questions),
                 "output_tokens": 0,  # nothing is generated
