@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 from transformers import AutoModel, AutoTokenizer, PreTrainedModel
 
-from src.pointwise.encoding import EncodedRequest, encode_request
+from src.pointwise.encoding import MAX_STATE_TOKENS, EncodedRequest, encode_request
 from src.pointwise.packing import StateCache, pack, packed_forward
 from src.pointwise.schema import SystemOneRequest, to_answers
 
@@ -53,6 +53,9 @@ class DecisionModel(nn.Module):
         self.backbone = backbone  # bare backbone (AutoModel): no vocabulary head, we never generate
         self.tokenizer = tokenizer
         self.head = PointerHead(backbone.config.hidden_size, head_dim).to(backbone.device)
+        # Serving limits; a server lowers them (src/serve.py). Training and evaluation leave the defaults.
+        self.max_state_tokens: int = MAX_STATE_TOKENS
+        self.max_request_tokens: int | None = None
 
     @classmethod
     def from_pretrained(cls, name: str, device: str, dtype: torch.dtype) -> DecisionModel:
@@ -61,7 +64,7 @@ class DecisionModel(nn.Module):
         return cls(backbone.to(device).eval(), tokenizer).eval()
 
     def encode(self, request: SystemOneRequest) -> EncodedRequest:
-        return encode_request(self.tokenizer, request)
+        return encode_request(self.tokenizer, request, self.max_state_tokens, self.max_request_tokens)
 
     def forward(self, batch: list[EncodedRequest]) -> list[list[torch.Tensor]]:
         """Option logits per request, per question: one padded forward pass over
@@ -94,11 +97,13 @@ class DecisionModel(nn.Module):
         packed = pack(encoded.state_ids, [q.ids for q in encoded.questions])
         return [z.softmax(-1).tolist() for z in self._head_logits(encoded, state_cache.features(self.backbone, packed))]
 
-    def decide(self, request: SystemOneRequest | dict, state_cache: StateCache | None = None) -> dict:
-        """A /v1/systemone request -> its response body."""
+    def decide(self, request: SystemOneRequest | dict, state_cache: StateCache | None = None,
+               encoded: EncodedRequest | None = None) -> dict:
+        """A /v1/systemone request -> its response body. A server passes `encoded` (from encode(request)) so the
+        CPU-bound tokenising happens before it takes the GPU."""
         if isinstance(request, dict):
             request = SystemOneRequest.model_validate(request)
-        encoded = self.encode(request)
+        encoded = self.encode(request) if encoded is None else encoded
         return {
             "model": request.model,
             "answers": to_answers(request, self.probs(encoded, state_cache)),

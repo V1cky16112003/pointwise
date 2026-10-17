@@ -5,6 +5,7 @@ a cached request gives the same probabilities as an uncached one, two states nev
 the endpoint's body is exactly model.decide()'s, and bad input is a 4xx, never a 500.
 """
 import json
+import time
 
 import pytest
 
@@ -265,6 +266,296 @@ def test_caller_text_the_encoder_refuses_is_a_422_but_other_value_errors_are_ser
     assert got.status_code == 500 and got.json() == {"detail": {"error": "decision_failed"}}
 
 
+def questions(n):
+    return {f"q{i}": {"type": "noul", "instructions": f"Is point {i} true?"} for i in range(n)}
+
+
+def test_too_many_questions_is_a_422_and_the_limit_itself_is_allowed(client, monkeypatch):
+    monkeypatch.setattr(serve, "_max_questions", 3)
+    assert client.post("/v1/systemone", json={**REQUEST, "questions": questions(3)}).status_code == 200
+    got = client.post("/v1/systemone", json={**REQUEST, "questions": questions(4)})
+    assert got.status_code == 422 and got.json()["detail"]["error"] == "too_many_questions"
+
+
+def test_state_and_total_token_limits_are_422s_with_the_counts(client, monkeypatch):
+    monkeypatch.setattr(serve._pointwise, "max_state_tokens", 40)
+    monkeypatch.setattr(serve._pointwise, "max_request_tokens", 200)
+    assert client.post("/v1/systemone", json={**REQUEST, "state": "short"}).status_code == 200
+    long_state = client.post("/v1/systemone", json={**REQUEST, "state": "word " * 60})
+    assert long_state.status_code == 422 and "over the 40-token limit" in long_state.json()["detail"]["message"]
+    many = client.post("/v1/systemone", json={**REQUEST, "state": "short", "questions": questions(30)})
+    assert many.status_code == 422 and "200-token limit" in many.json()["detail"]["message"]
+    assert many.json()["detail"]["error"] == "context_overflow"
+
+
+def test_loading_applies_the_limits_and_rejects_inconsistent_ones(tmp_path, tokenizer, monkeypatch):
+    peft = pytest.importorskip("peft")
+    from src.pointwise import train as T
+
+    weights, metrics = write_state(tmp_path)
+    fresh = DecisionModel(peft.get_peft_model(
+        tiny_backbone(tokenizer), peft.LoraConfig(task_type="FEATURE_EXTRACTION", r=4, target_modules=["q_proj"])), tokenizer)
+    monkeypatch.setattr(T, "build_model", lambda args, device: fresh)
+    monkeypatch.setattr(T, "load_trainable", lambda model, state: None)
+    monkeypatch.setattr(serve, "_pointwise", None)
+    monkeypatch.setattr(serve, "_state_cache", None)
+    monkeypatch.setattr(serve, "_max_questions", 32)
+    with pytest.raises(SystemExit, match="below POINTWISE_MAX_STATE_TOKENS"):
+        serve.load_pointwise(weights, metrics, device="cpu", max_state_tokens=500, max_request_tokens=100)
+    with pytest.raises(SystemExit, match="must be positive"):
+        serve.load_pointwise(weights, metrics, device="cpu", max_questions=0)
+    serve.load_pointwise(weights, metrics, device="cpu", max_state_tokens=300, max_request_tokens=900, max_questions=5)
+    assert (fresh.max_state_tokens, fresh.max_request_tokens, serve._max_questions) == (300, 900, 5)
+
+
+def test_max_queue_zero_serves_an_idle_server_and_rejects_only_when_busy(client, monkeypatch):
+    monkeypatch.setattr(serve, "_max_queue", 0)  # never wait
+    assert client.post("/v1/systemone", json=REQUEST).status_code == 200  # idle: nothing to wait for
+    with serve._gpu_lock:  # busy
+        got = client.post("/v1/systemone", json=REQUEST)
+    assert got.status_code == 503 and got.headers["retry-after"] == "1" and got.json()["detail"]["error"] == "overloaded"
+    assert serve._waiting == 0
+    assert client.post("/v1/systemone", json=REQUEST).status_code == 200
+
+
+def test_a_request_that_waits_too_long_for_the_gpu_is_a_503_and_releases_its_place(client, monkeypatch):
+    monkeypatch.setattr(serve, "_queue_timeout", 0.05)
+    with serve._gpu_lock:  # another request holds the GPU
+        got = client.post("/v1/systemone", json=REQUEST)
+        assert got.status_code == 503 and "waited" in got.json()["detail"]["message"]
+        assert serve._waiting == 0
+    assert client.post("/v1/systemone", json=REQUEST).status_code == 200
+
+
+def test_the_gpu_lock_is_released_after_a_failed_request(client, monkeypatch):
+    monkeypatch.setattr(serve._pointwise, "decide", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    assert client.post("/v1/systemone", json=REQUEST).status_code == 500
+    assert not serve._gpu_lock.locked()
+
+
+def test_predict_shares_the_same_queue(monkeypatch):
+    from src.config import load_task_config
+
+    monkeypatch.setattr(serve, "_config", load_task_config())
+    monkeypatch.setattr(serve, "_model", object())
+    monkeypatch.setattr(serve, "_tokenizer", object())
+    monkeypatch.setattr(serve, "_max_queue", 0)
+    with serve._gpu_lock:
+        got = TestClient(serve.app, raise_server_exceptions=False).post("/predict", json={"message": "hi"})
+    assert got.status_code == 503 and got.json()["detail"]["error"] == "overloaded"
+
+
+def test_bad_queue_settings_stop_startup(tmp_path, monkeypatch):
+    weights, metrics = write_state(tmp_path)
+    monkeypatch.delenv("ADAPTER_DIR", raising=False)
+    monkeypatch.setenv("POINTWISE_WEIGHTS", weights)
+    monkeypatch.setenv("POINTWISE_METRICS", metrics)
+    monkeypatch.setattr(serve, "_max_queue", 16)  # restored afterwards: configure_from_env sets these globals
+    monkeypatch.setattr(serve, "_queue_timeout", 10.0)
+    monkeypatch.setenv("POINTWISE_QUEUE_TIMEOUT_S", "soon")
+    with pytest.raises(SystemExit, match="must be a number"):
+        serve.configure_from_env()
+    for bad in ("0", "-1", "inf", "nan", "1e12"):  # inf and 1e12 would make acquire(timeout=...) raise on every request
+        monkeypatch.setenv("POINTWISE_QUEUE_TIMEOUT_S", bad)
+        with pytest.raises(SystemExit, match="positive number up to"):
+            serve.configure_from_env()
+    monkeypatch.setenv("POINTWISE_QUEUE_TIMEOUT_S", "5")
+    monkeypatch.setenv("POINTWISE_MAX_QUEUE", "-1")
+    with pytest.raises(SystemExit, match="must be between 0 and 24"):
+        serve.configure_from_env()
+    monkeypatch.setenv("POINTWISE_MAX_QUEUE", "25")
+    with pytest.raises(SystemExit, match="must be between 0 and 24"):
+        serve.configure_from_env()
+
+
+def test_overload_is_logged_counted_and_shows_how_long_the_gpu_has_been_busy(client, monkeypatch, caplog):
+    monkeypatch.setattr(serve, "_max_queue", 0)
+    before = serve._rejected
+    with caplog.at_level("WARNING", logger="src.serve"):
+        with serve._gpu():  # a request holds the GPU
+            assert serve._busy_since is not None
+            assert client.post("/v1/systemone", json=REQUEST).status_code == 503
+    assert serve._busy_since is None and serve._rejected == before + 1
+    assert any("overloaded: queue is full" in r.message and "gpu_busy_for=" in r.message for r in caplog.records)
+    assert "Shoes arrived" not in caplog.text  # metadata only
+
+
+def test_gpu_gate_under_real_concurrency_keeps_one_holder_and_leaks_nothing(monkeypatch):
+    import threading
+    import time
+
+    monkeypatch.setattr(serve, "_max_queue", 3)
+    monkeypatch.setattr(serve, "_queue_timeout", 5.0)
+    holders = peak = served = rejected = 0
+    guard = threading.Lock()
+
+    def worker():
+        nonlocal holders, peak, served, rejected
+        try:
+            with serve._gpu():
+                with guard:
+                    holders += 1
+                    peak = max(peak, holders)
+                time.sleep(0.01)
+                with guard:
+                    holders -= 1
+                    served += 1
+        except serve.HTTPException as exc:
+            assert exc.status_code == 503
+            with guard:
+                rejected += 1
+
+    threads = [threading.Thread(target=worker) for _ in range(40)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert peak == 1 and served + rejected == 40 and served >= 1
+    assert serve._waiting == 0 and not serve._gpu_lock.locked() and serve._busy_since is None
+
+
+def test_oversize_bodies_are_a_413_before_parsing_whether_declared_or_chunked(client, monkeypatch):
+    monkeypatch.setattr(serve, "_max_body_bytes", 300)
+    small = client.post("/v1/systemone", json={"state": "x", "questions": questions(1)})
+    assert small.status_code == 200
+    big = {**REQUEST, "state": "word " * 400}
+    declared = client.post("/v1/systemone", json=big)
+    assert declared.status_code == 413 and declared.json()["detail"]["error"] == "body_too_large"
+    assert declared.headers["connection"] == "close"
+
+    def chunks():  # no Content-Length: sent as a chunked stream
+        data = json.dumps(big).encode()
+        for i in range(0, len(data), 100):
+            yield data[i : i + 100]
+
+    chunked = client.post("/v1/systemone", content=chunks(), headers={"content-type": "application/json"})
+    assert chunked.status_code == 413 and chunked.json()["detail"]["error"] == "body_too_large"
+    assert not serve._gpu_lock.locked() and serve._waiting == 0  # never reached the model
+
+
+def test_encoding_stops_tokenising_as_soon_as_the_request_is_over_the_limit(tokenizer, monkeypatch):
+    from src.pointwise import encoding
+    from src.pointwise.encoding import ContextOverflow, encode_request
+
+    calls = 0
+    real = encoding.user_tokens
+
+    def counting(tok, text):
+        nonlocal calls
+        calls += 1
+        return real(tok, text)
+
+    monkeypatch.setattr(encoding, "user_tokens", counting)
+    request = SystemOneRequest.model_validate({**REQUEST, "state": "short", "questions": questions(200)})
+    with pytest.raises(ContextOverflow, match="exceeds the 120-token limit"):
+        encode_request(tokenizer, request, 4096, max_request_tokens=120)
+    assert calls < 60  # three calls per question: all 200 questions would be 600 calls
+    many_options = SystemOneRequest.model_validate({**REQUEST, "state": "short", "questions": {
+        "q": {"type": "choice", "instructions": "Pick", "criteria": {f"option number {i}": None for i in range(255)}}}})
+    calls = 0
+    with pytest.raises(ContextOverflow):
+        encode_request(tokenizer, many_options, 4096, max_request_tokens=100)
+    assert calls < 40  # stopped inside the option list, not after all 255
+
+
+def test_defaults_come_from_one_set_of_constants():
+    import inspect
+
+    sig = inspect.signature(serve.load_pointwise).parameters
+    assert sig["max_state_tokens"].default == serve.DEFAULT_MAX_STATE_TOKENS
+    assert sig["max_request_tokens"].default == serve.DEFAULT_MAX_REQUEST_TOKENS
+    assert sig["max_questions"].default == serve.DEFAULT_MAX_QUESTIONS == serve._max_questions
+    assert sig["cache_entries"].default == serve.DEFAULT_CACHE_ENTRIES and sig["cache_tokens"].default == serve.DEFAULT_CACHE_TOKENS
+
+
+def test_overload_503_is_built_whether_or_not_a_request_holds_the_gpu(monkeypatch):
+    monkeypatch.setattr(serve, "_busy_since", time.monotonic())
+    assert serve._overloaded("queue is full").status_code == 503
+    monkeypatch.setattr(serve, "_busy_since", None)
+    assert serve._overloaded("queue is full").status_code == 503
+
+
+def test_tokenising_and_rejection_happen_before_the_gpu_is_taken(client, monkeypatch):
+    seen = []
+    real = serve._pointwise.decide
+
+    def spy(request, state_cache=None, encoded=None):
+        assert encoded is not None  # encoded before the lock, passed in
+        seen.append(serve._gpu_lock.locked())
+        return real(request, state_cache=state_cache, encoded=encoded)
+
+    monkeypatch.setattr(serve._pointwise, "decide", spy)
+    assert client.post("/v1/systemone", json=REQUEST).status_code == 200 and seen == [True]  # decide runs under the lock
+    monkeypatch.setattr(serve._pointwise, "max_state_tokens", 10)
+    with serve._gpu_lock:  # the GPU is busy and the queue is closed...
+        monkeypatch.setattr(serve, "_max_queue", 0)
+        got = client.post("/v1/systemone", json={**REQUEST, "state": "word " * 50})
+    assert got.status_code == 422  # ...yet the oversize request is told so (422), not turned away (503)
+
+
+def test_the_request_limit_counts_the_decide_token(tokenizer):
+    from src.pointwise.encoding import ContextOverflow, encode_request
+
+    request = SystemOneRequest.model_validate({"state": "short", "questions": questions(1)})
+    e = encode_request(tokenizer, request)
+    exact = len(e.state_ids) + len(e.questions[0].ids)  # includes the decide token
+    assert len(encode_request(tokenizer, request, 4096, exact).questions) == 1  # fits at exactly the limit
+    with pytest.raises(ContextOverflow):
+        encode_request(tokenizer, request, 4096, exact - 1)  # one token over, which only the decide token pushes over
+
+
+def test_the_shared_tokenizer_encodes_identically_from_many_threads(tokenizer):
+    """Request threads share one tokenizer, and the server encodes outside any lock. Many threads must get the same ids
+    as a single thread, with no exception (HF tokenizers can raise 'Already borrowed' if misused across threads)."""
+    import random
+    import threading
+
+    from src.pointwise.encoding import encode_request
+
+    rng = random.Random(0)
+    words = "refund order late broken card charge delivery wrong size invoice account login".split()
+    requests = [SystemOneRequest.model_validate({"state": " ".join(rng.choice(words) for _ in range(rng.randint(5, 600))),
+                                                 "questions": {"q": {"type": "choice", "instructions": "Which team?",
+                                                                     "criteria": {w: f"about {w}" for w in words}}}})
+                for _ in range(24)]
+    expected = [encode_request(tokenizer, r, 10**6).state_ids for r in requests]
+    bad = []
+
+    def work(seed):
+        local = random.Random(seed)
+        for _ in range(25):
+            i = local.randrange(len(requests))
+            try:
+                if encode_request(tokenizer, requests[i], 10**6).state_ids != expected[i]:
+                    bad.append("mismatch")
+            except Exception as exc:  # noqa: BLE001
+                bad.append(repr(exc))
+
+    threads = [threading.Thread(target=work, args=(k,)) for k in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert bad == []
+
+
+def test_concurrent_http_requests_are_never_a_500(client):
+    import threading
+
+    results = []
+
+    def call(i):
+        results.append(client.post("/v1/systemone", json={**REQUEST, "state": f"Order {i} arrived late and broken."}).status_code)
+
+    threads = [threading.Thread(target=call, args=(i,)) for i in range(24)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert set(results) <= {200, 503} and results.count(200) >= 1
+    assert serve._waiting == 0 and not serve._gpu_lock.locked()
+
+
 def test_an_unexpected_failure_is_a_generic_500_that_leaks_nothing(client, monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("secret internal detail")
@@ -409,3 +700,11 @@ def test_p95_is_the_95th_percentile_of_the_samples():
 
     assert L.summarise([float(i) for i in range(1, 101)])["p95"] == 95.0
     assert L.summarise([3.0, 1.0, 2.0])["median"] == 2.0
+
+
+def test_token_ratios_are_generate_and_parse_over_pointwise():
+    from scripts.count_tokens import ratios
+
+    got = ratios(state=500, questions=[20, 20, 20, 20], prompts=[520] * 4)
+    assert (got["one_pass"], got["cached"], got["generate_and_parse"]) == (580, 80, 2080)
+    assert got["x_one_pass"] == pytest.approx(2080 / 580) and got["x_cached"] == pytest.approx(26.0)

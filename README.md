@@ -87,6 +87,34 @@ One 524-token state and 8 three-option questions, p95 over 60 requests, against 
   on one state, with no top option changed (the merged-and-cached case was not checked). Each cell times the same request 60
   times; HTTP, concurrency and other state lengths were not measured.
 
+## Token efficiency
+
+Pointwise reads the state once, however many questions are asked about it, so with several questions on one state it needs fewer model input tokens. Counted with the Qwen3 tokenizer on the
+Phase 6 latency request (a 524-token state and three-option questions), model input tokens against generate-and-parse
+(one prompt per question, each carrying the whole state again) were (`reports/pointwise-tokens.md`):
+
+| Questions about one state | Pointwise, one pass | Pointwise, on a cache hit (vs no-cache baseline) | Generate-and-parse |
+|---|---|---|---|
+| 1 | 542 (no saving) | 18 (30.2x fewer) | 544 |
+| 2 | 561 (1.9x) | 37 (29.5x) | 1,090 |
+| 4 | 603 (3.6x) | 79 (27.6x) | 2,182 |
+| 8 | 680 (6.4x) | 156 (28.0x) | 4,365 |
+
+- **One pass:** the saving comes from sharing the state across the questions of one request, so it grows with the
+  number of questions (no saving at one question, 6.4x fewer at eight).
+- **On a cache hit:** this column is a different effect, and is not what the server's `usage.input_tokens` reports (that
+  still counts state plus questions, 542 for one question). It is the tokens a request computes when its state is
+  already stored; the first request for a state is a miss and pays for all of it, so the ratio is only reached on
+  later requests. It assumes the state was already sent in an earlier request and
+  is held in the server's cache, so only the questions are read; it is a cross-request cache effect against a
+  generate-and-parse setup with no cache at all, and it does not grow with the number of questions.
+- Pointwise generates no tokens. Generate-and-parse was capped at 8 new tokens per question in the Phase 5 test; the
+  number it actually generated was not recorded.
+- With many options, the question and its options dominate: a Banking77 record is 449 tokens, 97% of them the question
+  and its 77 options (about 5.6 tokens per option).
+- Caveats: the request is one constructed shape, and a generate-and-parse setup with prefix caching would close much
+  of the gap; that was not measured. This is token counts, not time; the measured latency is above.
+
 ## Repo layout
 
 ```
@@ -96,6 +124,7 @@ src/readout.py        # Phase 0 label read-out for the Banking77 classifier
 src/evaluate_core.py  # shared metrics (ECE, Brier, AURC, coverage), CI-tested without torch
 scripts/kaggle_job.py # the job the Kaggle notebook runs (currently the Phase 6 latency measurement)
 scripts/phase6_latency.py  # cold / cached / merged serving latency on one T4
+scripts/count_tokens.py    # token counts per request shape (reports/pointwise-tokens.md)
 src/serve.py          # FastAPI: /v1/systemone (Pointwise, state-prefix cache) and the Phase 0 /predict
 scripts/phase5_eval.py   # all arms on one T4; scripts/phase5_report.py builds reports/ from its output
 src/pointwise/baselines.py, compare.py  # no-training scoring; arm alignment and paired bootstrap

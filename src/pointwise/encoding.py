@@ -41,7 +41,8 @@ class UnsafeText(ValueError):
 
 
 class ContextOverflow(ValueError):
-    """The state is longer than the model accepts. A server turns it into a 422."""
+    """The request is longer than the model accepts: the state alone, or the state plus every question. A server turns
+    it into a 422."""
 
 
 @dataclass(frozen=True)
@@ -80,7 +81,7 @@ def user_tokens(tokenizer, text: str) -> list[int]:
 
 
 def encode_request(
-    tokenizer, request: SystemOneRequest, max_state_tokens: int = MAX_STATE_TOKENS
+    tokenizer, request: SystemOneRequest, max_state_tokens: int = MAX_STATE_TOKENS, max_request_tokens: int | None = None
 ) -> EncodedRequest:
     state_tok, question_tok, open_tok, close_tok, decide_tok = delimiter_ids(tokenizer)
     state_ids = [state_tok] + user_tokens(tokenizer, render(request.state))
@@ -89,13 +90,23 @@ def encode_request(
             f"state is {len(state_ids):,} tokens, over the {max_state_tokens:,}-token limit"
         )
     questions = []
+    used = len(state_ids)  # tokens so far; checked as we go, so an oversize request stops being tokenised early
+
+    def check(extra: int) -> None:
+        if max_request_tokens is not None and used + extra > max_request_tokens:  # the packed mask grows with this squared
+            raise ContextOverflow(f"request exceeds the {max_request_tokens:,}-token limit (state plus every question)")
+
     for question in request.questions.values():
         _, texts = question_options(question)
         ids = [question_tok] + user_tokens(tokenizer, render(question.instructions))
+        check(len(ids))
         option_offsets = []
         for text in texts:
             ids += [open_tok] + user_tokens(tokenizer, text) + [close_tok]
             option_offsets.append(len(ids) - 1)
+            check(len(ids))
+        check(len(ids) + 1)  # the decide token below
         ids.append(decide_tok)
         questions.append(EncodedQuestion(ids, len(ids) - 1, option_offsets))
+        used += len(ids)
     return EncodedRequest(state_ids, questions)
