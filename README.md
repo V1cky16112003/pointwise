@@ -5,7 +5,7 @@ calibrated decisions out, without generating text.** You send a state plus quest
 options, and the model returns a probability for every option. The answer is always one of the declared options,
 so an out-of-schema answer cannot happen.
 
-Status: **Phase 5 (evaluation) is done except the Kev comparison, which was not run**; Phases 0–4 are done. **Phase 6 (serving) is built and tested on CPU; its T4 latency numbers are not measured yet.** The Phase 4
+Status: **Phase 5 (evaluation) is done except the Kev comparison, which was not run**; Phases 0–4 are done. **Phase 6 (serving) is built; the 150 ms target is met only with a cached state (see below).** The Phase 4
 calibration gate **failed** (pooled out-of-domain ECE 0.056 against a 0.05 target) and run 3 was not retuned.
 The full comparison is in `reports/pointwise-results.md`.
 
@@ -74,6 +74,19 @@ Full tables, reliability diagrams and risk–coverage curves: `reports/pointwise
   by 30.6 points because that data is in-domain for it.
 - **Not run:** Kev-0.8B/4B (Banking77 is in its training data and it needs a separate environment).
 
+## Phase 6 results (serving latency, T4)
+
+One 524-token state and 8 three-option questions, p95 over 60 requests, against the plan's 150 ms target
+(`reports/pointwise-serving.md`):
+
+- **Cold state:** 212 ms with the adapter unmerged (not met) and 179 ms merged (not met).
+- **Cached state (state-prefix KV cache):** 83 ms unmerged and 56 ms merged (both met).
+- **A cache miss is slower than no cache:** 298 ms p95 at k=8 (medians: +85 ms over cold at k=8, +144 ms at k=1), so
+  the unmerged cache pays only when more than about 40% to 66% of requests reuse a stored state (computed from medians).
+- Cached and merged answers differ from the plain ones by at most 0.0026 in probability over 8 distinct questions
+  on one state, with no top option changed (the merged-and-cached case was not checked). Each cell times the same request 60
+  times; HTTP, concurrency and other state lengths were not measured.
+
 ## Repo layout
 
 ```
@@ -112,5 +125,5 @@ pytest tests/ -v
 - The Phase 4 calibration gate failed (pooled out-of-domain ECE 0.056 against a 0.05 target).
 - Each result is a single run with one seed, and each source has 500 held-out questions, so small gaps between
   runs may be noise. Phase 5 reports bootstrap confidence intervals; calibration differences (ECE) have none.
-- `POST /v1/systemone` exists in `src/serve.py` with a state-prefix cache but has not been run on the real model or a GPU; see `docs/designs/pointwise-plan.md`, Phase 6 log.
+- `POST /v1/systemone` exists in `src/serve.py` but the server itself was only tested on a tiny random model; the latency script ran on the real model on a T4. Cold requests miss the 150 ms target (see Phase 6 results).
 - Training data are public datasets plus rule-generated records. There is no teacher-labelled synthetic set.

@@ -176,7 +176,7 @@ true distribution, and why one-hot training still ends up overconfident.
 - **Gate:** p95 latency < 150 ms for 1 state + 8 questions on T4.
 
 **Phase 6 log**
-- **2026-10-16, built and tested, T4 latency not yet measured.** Model is Phase 4 run 3, unchanged (T 1.516 comes from
+- **2026-10-16 built and tested; 2026-10-17 T4 latency measured (Kaggle `mini-jev-phase-0` version 18, commit 0d56b95).** Model is Phase 4 run 3, unchanged (T 1.516 comes from
   `artifacts/run3/metrics.json` at startup).
   - Built: `POST /v1/systemone` in `src/serve.py` (body validated by `schema.py`, answers from `DecisionModel.decide`,
     422 for malformed input or a state over 32,768 tokens, a generic 500 that leaks nothing, 503 if the model is not
@@ -192,13 +192,22 @@ true distribution, and why one-hot training still ends up overconfident.
     backbone, 4xx for malformed input and caller text the encoder refuses, a generic 500 otherwise, startup failures
     (missing files, T not positive, metrics from other weights, bad cache sizes). Ad hoc and not in the suite: a CPU
     smoke of the cache and the latency script on Qwen3-0.6B-Base through `train.build_model`, and a deliberate break
-    of the cache key and of the crop, which made the tests fail. Not tested: the real 1.7B model loaded through
+    of the cache key and of the crop, which made the tests fail. Not tested before the T4 job (see Results below for what it then measured): the real 1.7B model loaded through
     `load_pointwise`, anything on a GPU, fp16 agreement on real weights, a state near the 32k-token cap (the block
     mask is O(length^2) and could run out of memory; that would be a 500), a request with hundreds of questions or many long options (only the state length is capped), and the cache at its limits: a state over `POINTWISE_CACHE_TOKENS` (default 16,384) is answered uncached, and a full cache briefly holds one extra state during prefill.
-  - The T4 job also records how far cached and merged answers drift from the uncached, unmerged ones on the real
+  - The T4 job also recorded how far cached and merged answers drift from the uncached, unmerged ones on the real
     weights (largest probability difference and top-option flips); T 1.516 was fitted on the unmerged model.
-  - Cost of the T4 job: no data build, one model load, six configurations x four k x 65 requests. About 15-20 minutes
-    in one session, so ~0.3 GPU-h of quota (an estimate; not measured).
+  - **Gate (p95 < 150 ms for 1 state + 8 questions on a T4): met only with a cached state; not met cold.** See Results.
+  - **Results** (`reports/pointwise-serving.md`, 524-token state, k=8 questions, p95 against the 150 ms target): cold
+    unmerged 212 ms (not met, 62 over), cold merged 179 ms (not met, 29 over), cached unmerged 83 ms (met), cache miss
+    298 ms (not met), cached merged 56 ms (met). A cache miss is slower than no cache at every k (+144 ms at k=1, +85 ms
+    at k=8, by medians), so the unmerged cache pays only if more than about 40% (k=8) to 66% (k=1) of requests reuse a
+    stored state (from medians; the merged miss cost was not measured). Largest probability drift on the real weights:
+    cached 0.0018, merged 0.0026, no top option changed, over 8 distinct questions on one state (the merged-and-cached
+    configuration was not checked). One state stores 57.3 MiB. Not measured: HTTP, concurrency, other state lengths, accuracy or calibration of the
+    merged model, the real `load_pointwise` start-up.
+  - Cost of the T4 job: no data build, one model load, six configurations x four k x 65 requests. The estimate was
+    15-20 minutes, about 0.3 GPU-h; the actual session time was not measured here.
 
 ## Phase 7 — Stretch
 - RLCD stage 2 with rationales (OpenJev Algorithm 1) on a reasoning task.
