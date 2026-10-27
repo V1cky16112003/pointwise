@@ -10,6 +10,12 @@ Two models, each switched on by an env var, at least one required:
   POINTWISE_MAX_BODY_BYTES (1 MiB; over it a 413 before any parsing). Overload: POINTWISE_MAX_QUEUE (16 requests
   waiting for the GPU, 0 = never wait) and POINTWISE_QUEUE_TIMEOUT_S (10); past either the server answers 503 with
   Retry-After. A route whose model is not configured also answers 503.
+  Operations (src/serve_ops.py): POINTWISE_API_KEY (if set, every path except /healthz and /readyz needs
+  `Authorization: Bearer <key>`), POINTWISE_STUCK_AFTER_S (60; /readyz fails when one request has held the GPU this long)
+  and POINTWISE_SHUTDOWN_GRACE_S (25, at least 3: the whole shutdown, to be kept below your orchestrator's kill timeout.
+  Under src.serve_main 1 s is held back, uvicorn gets 80% of the rest and the drain the remainder; under plain
+  `uvicorn src.serve:app` uvicorn's wait is unbounded and the drain may use the whole grace). GET /healthz, /readyz, /metrics.
+  Run with `python -m src.serve_main` for a drain that starts at the shutdown signal.
 
 Applies: fail-fast on missing/corrupted adapter (1A), structured error
 responses (2A), input validation with length cap (3A), metadata-only logging
@@ -17,10 +23,12 @@ that never persists raw input text (3B).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
 import os
+import re
 import sys
 import threading
 import time
@@ -29,7 +37,7 @@ from pathlib import Path
 
 import torch
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from peft import PeftModel
 from pydantic import BaseModel, Field
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -40,9 +48,20 @@ from src.evaluate_core import format_label_for_display, parse_label
 from src.pointwise.encoding import ContextOverflow, UnsafeText
 from src.pointwise.packing import StateCache
 from src.pointwise.schema import SystemOneRequest
+from src.serve_ops import DEFAULT_SHUTDOWN_GRACE_S, MIN_GRACE_S, OPS, RequestContext, install_request_id_logging
+from src.serve_ops import env_flag as _env_flag
+from src.serve_ops import env_float as _env_float
+from src.serve_ops import env_int as _env_int
 from src.train import MODEL_NAME
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+install_request_id_logging()
+_LOG_FORMAT = "%(asctime)s %(levelname)s [%(request_id)s] %(message)s"
+logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT)
+# Records from other loggers (libraries, uvicorn) have no request id: with a default they print "-" instead of failing.
+# The id itself comes from a filter on the src.serve logger (serve_ops.install_request_id_logging).
+for _handler in logging.getLogger().handlers:
+    if getattr(_handler.formatter, "_fmt", None) == _LOG_FORMAT:
+        _handler.setFormatter(logging.Formatter(_LOG_FORMAT, defaults={"request_id": "-"}))
 logger = logging.getLogger(__name__)
 
 _MAX_MESSAGE_LENGTH = 500
@@ -59,6 +78,7 @@ DEFAULT_MAX_STATE_TOKENS, DEFAULT_MAX_REQUEST_TOKENS, DEFAULT_MAX_QUESTIONS = 40
 DEFAULT_MAX_BODY_BYTES = 1 << 20  # 1 MiB: far above 8,192 tokens of text, far below what could exhaust memory
 DEFAULT_CACHE_ENTRIES, DEFAULT_CACHE_TOKENS = 8, 16384
 DEFAULT_MAX_QUEUE, DEFAULT_QUEUE_TIMEOUT_S = 16, 10.0
+DEFAULT_STUCK_AFTER_S = 60.0
 # Every waiting request holds one thread of FastAPI's sync-route pool (anyio default 40), as does the one holding the GPU
 # and each request still tokenising. A longer queue would fill the pool, and the requests beyond it would wait unseen,
 # outside the queue and its timeout. 24 leaves some headroom for the tokenising threads. Any health or metrics route
@@ -71,7 +91,10 @@ _max_body_bytes = DEFAULT_MAX_BODY_BYTES
 # grow without bound. _max_queue = 0 means "never wait, reject if busy".
 _max_queue = DEFAULT_MAX_QUEUE
 _queue_timeout = DEFAULT_QUEUE_TIMEOUT_S
+_stuck_after = DEFAULT_STUCK_AFTER_S  # /readyz reports not ready once one request has held the GPU this long
+_shutdown_grace = DEFAULT_SHUTDOWN_GRACE_S
 _waiting = 0
+_last_not_ready: str | None = None  # so /readyz logs a reason when it changes, not on every probe
 _rejected = 0  # requests turned away with a 503 for overload since start
 _busy_since: float | None = None  # monotonic start of the request holding the GPU; a hung one shows as a growing age
 _queue_lock = threading.Lock()
@@ -229,32 +252,14 @@ def load_pointwise(weights: str, metrics: str, device: str | None = None, merge_
                 + (" (T was fitted on the unmerged model; see scripts/phase6_latency.py for the drift)" if merge_lora else ""))
 
 
-def _env_float(name: str, default: float) -> float:
-    try:
-        value = float(os.environ.get(name, default))
-    except ValueError:
-        sys.exit(f"FATAL: {name} must be a number, got {os.environ[name]!r}.")
-    if not 0 < value <= threading.TIMEOUT_MAX:  # also rejects inf and nan; acquire(timeout=inf) raises on every request
-        sys.exit(f"FATAL: {name} must be a positive number up to {threading.TIMEOUT_MAX:g}, got {value}.")
-    return value
-
-
-def _env_flag(name: str) -> bool:
-    value = os.environ.get(name, "0")
-    if value not in ("0", "1"):
-        sys.exit(f"FATAL: {name} must be 0 or 1, got {value!r}.")
-    return value == "1"
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, default))
-    except ValueError:
-        sys.exit(f"FATAL: {name} must be an integer, got {os.environ[name]!r}.")
-
-
 def configure_from_env() -> None:
-    global _max_queue, _queue_timeout, _max_body_bytes
+    global _max_queue, _queue_timeout, _max_body_bytes, _stuck_after, _shutdown_grace
+    _stuck_after = _env_float("POINTWISE_STUCK_AFTER_S", DEFAULT_STUCK_AFTER_S)
+    _shutdown_grace = _env_float("POINTWISE_SHUTDOWN_GRACE_S", DEFAULT_SHUTDOWN_GRACE_S, MIN_GRACE_S)
+    api_key = os.environ.get("POINTWISE_API_KEY")
+    if api_key is not None and (not api_key.strip() or api_key != api_key.strip() or not api_key.isascii()):
+        sys.exit("FATAL: POINTWISE_API_KEY must be a non-empty ASCII string with no surrounding whitespace.")
+    OPS.api_key = api_key
     _max_queue = _env_int("POINTWISE_MAX_QUEUE", DEFAULT_MAX_QUEUE)
     _queue_timeout = _env_float("POINTWISE_QUEUE_TIMEOUT_S", DEFAULT_QUEUE_TIMEOUT_S)
     _max_body_bytes = _env_int("POINTWISE_MAX_BODY_BYTES", DEFAULT_MAX_BODY_BYTES)
@@ -281,14 +286,39 @@ def configure_from_env() -> None:
         )
 
 
+async def _drain() -> None:
+    """Shutdown: stop taking data requests, then wait for requests still running (on the event loop, in the queue, or on
+    the GPU). Under src.serve_main, uvicorn has already waited its share of POINTWISE_SHUTDOWN_GRACE_S for open
+    connections and OPS.drain_wait is the rest; under plain uvicorn nothing limits that first wait, so the whole grace
+    is used. A worker thread that uvicorn cancelled before it reached the GPU is not visible here; it dies with the
+    process."""
+    OPS.draining = True
+    wait = _shutdown_grace if OPS.drain_wait is None else OPS.drain_wait
+    deadline = time.monotonic() + wait
+    busy = lambda: _gpu_lock.locked() or _waiting or OPS.inflight  # noqa: E731
+    while busy() and time.monotonic() < deadline:
+        await asyncio.sleep(0.05)
+    if busy():
+        logger.warning(f"shutdown: gave up waiting after {wait:g}s with work still in flight")
+    else:
+        logger.info("shutdown: no work in flight")
+
+
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
+    global _last_not_ready
+    OPS.draining = OPS.signalled  # a restarted app must not begin life draining, but a SIGTERM that arrived first stands
+    _last_not_ready = None  # a new run starts with a clean slate for /readyz's log-on-change
     configure_from_env()
-    yield
+    try:
+        yield
+    finally:
+        await _drain()
 
 
 app = FastAPI(title="Pointwise and Banking Support Intent Classifier", lifespan=_lifespan)
 app.add_middleware(BodyLimit)
+app.add_middleware(RequestContext)  # added last, so outermost: it sees (and counts) the 413s and 503s of the rest
 
 
 @app.post("/predict", response_model=PredictResponse)
@@ -360,5 +390,58 @@ def systemone(request: SystemOneRequest) -> dict:
     return response
 
 
-# Note: a /health + /model-info endpoint was explicitly deferred to TODOS.md
-# (item 6, from the office-hours cherry-pick ceremony) — not built here.
+def readiness() -> tuple[bool, str]:
+    """Can this instance take traffic? Not while draining, with no model loaded, or with the GPU stuck on one request."""
+    if OPS.draining:
+        return False, "shutting down"
+    if _pointwise is None and _model is None:
+        return False, "no model loaded"
+    since = _busy_since  # one read: the holder may clear it at any moment
+    if since is not None and time.monotonic() - since > _stuck_after:
+        return False, f"one request has held the GPU for {time.monotonic() - since:.0f}s (limit {_stuck_after:g}s)"
+    return True, "ready"
+
+
+# The three routes below are `async def` on purpose: they run on the event loop, never on a pool thread, so a full
+# request queue cannot starve a health probe or a metrics scrape.
+@app.get("/healthz")
+async def healthz() -> dict:
+    """Liveness: the process is up and answering."""
+    return {"status": "ok"}
+
+
+@app.get("/readyz")
+async def readyz():
+    """Readiness: 200 when this instance should receive traffic, else 503 with the reason."""
+    global _last_not_ready
+    ready, reason = readiness()
+    if ready:
+        _last_not_ready = None
+        return {"status": "ready"}
+    kind = re.sub(r"\d+", "N", reason)  # "held the GPU for 61s" and "...71s" are the same condition
+    if kind != _last_not_ready:  # the reason (it can include GPU timing) goes to the log, not to an open endpoint
+        logger.warning(f"readyz: not ready: {reason}")
+        _last_not_ready = kind
+    return JSONResponse({"status": "not ready"}, status_code=503)
+
+
+@app.get("/metrics")
+async def metrics() -> PlainTextResponse:
+    """Prometheus text format: request counts and latency, queue, GPU and state-cache gauges."""
+    since = _busy_since
+    ready, _ = readiness()
+    rows = [
+        ("pointwise_ready", "gauge", "1 if /readyz would answer 200.", int(ready)),
+        ("pointwise_queue_waiting", "gauge", "Requests waiting for the GPU.", _waiting),
+        ("pointwise_gpu_busy_seconds", "gauge", "How long the request holding the GPU has run (0 if idle).",
+         0 if since is None else round(time.monotonic() - since, 3)),
+        ("pointwise_overload_rejections_total", "counter", "Requests turned away with a 503 for overload.", _rejected),
+    ]
+    if _state_cache is not None:
+        rows += [
+            ("pointwise_state_cache_hits_total", "counter", "Requests whose state was already cached.", _state_cache.hits),
+            ("pointwise_state_cache_misses_total", "counter", "Requests whose state was not cached.", _state_cache.misses),
+            ("pointwise_state_cache_entries", "gauge", "States currently cached.", len(_state_cache)),
+            ("pointwise_state_cache_tokens", "gauge", "State tokens currently cached.", _state_cache.stored_tokens()),
+        ]
+    return PlainTextResponse(OPS.metrics.render(rows), media_type="text/plain; version=0.0.4")

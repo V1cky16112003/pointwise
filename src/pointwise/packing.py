@@ -226,6 +226,10 @@ class StateCache:
     def clear(self) -> None:
         self._entries.clear()
 
+    def stored_tokens(self) -> int:
+        """State tokens held, for metrics. Safe to call from another thread: list() copies the entries in one step."""
+        return sum(n for _, n in list(self._entries.values()))
+
     def features(self, model: PreTrainedModel, packed: Packed) -> list[torch.Tensor]:
         """Same result as packed_features, reusing or storing the state's cache."""
         state_ids = packed.ids[: packed.state_len]

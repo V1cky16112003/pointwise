@@ -5,6 +5,9 @@ a cached request gives the same probabilities as an uncached one, two states nev
 the endpoint's body is exactly model.decide()'s, and bad input is a 4xx, never a 500.
 """
 import json
+import logging
+import re
+import threading
 import time
 
 import pytest
@@ -357,7 +360,7 @@ def test_bad_queue_settings_stop_startup(tmp_path, monkeypatch):
         serve.configure_from_env()
     for bad in ("0", "-1", "inf", "nan", "1e12"):  # inf and 1e12 would make acquire(timeout=...) raise on every request
         monkeypatch.setenv("POINTWISE_QUEUE_TIMEOUT_S", bad)
-        with pytest.raises(SystemExit, match="positive number up to"):
+        with pytest.raises(SystemExit, match="must be a number from"):
             serve.configure_from_env()
     monkeypatch.setenv("POINTWISE_QUEUE_TIMEOUT_S", "5")
     monkeypatch.setenv("POINTWISE_MAX_QUEUE", "-1")
@@ -554,6 +557,318 @@ def test_concurrent_http_requests_are_never_a_500(client):
         t.join()
     assert set(results) <= {200, 503} and results.count(200) >= 1
     assert serve._waiting == 0 and not serve._gpu_lock.locked()
+
+
+@pytest.fixture
+def ops(monkeypatch):
+    """The server's shared operations state, with a fresh metrics store, restored afterwards."""
+    from src.serve_ops import Metrics
+
+    monkeypatch.setattr(serve.OPS, "metrics", Metrics())
+    monkeypatch.setattr(serve.OPS, "api_key", None)
+    monkeypatch.setattr(serve.OPS, "draining", False)
+    return serve.OPS
+
+
+def test_healthz_is_ok_and_readyz_is_ready_with_a_model(client, ops):
+    assert client.get("/healthz").json() == {"status": "ok"}
+    got = client.get("/readyz")
+    assert got.status_code == 200 and got.json() == {"status": "ready"}
+
+
+def test_readyz_is_503_and_logs_the_reason_once_when_not_ready(client, ops, monkeypatch, caplog):
+    monkeypatch.setattr(serve, "_pointwise", None)
+    monkeypatch.setattr(serve, "_model", None)
+    monkeypatch.setattr(serve, "_last_not_ready", None)
+    with caplog.at_level("WARNING", logger="src.serve"):
+        for _ in range(3):
+            got = client.get("/readyz")
+            assert got.status_code == 503 and got.json() == {"status": "not ready"}  # no reason on an open endpoint
+    assert caplog.text.count("readyz: not ready: no model loaded") == 1  # logged on change, not on every probe
+    assert client.get("/healthz").status_code == 200  # alive, just not ready
+
+
+def test_readyz_fails_when_one_request_has_held_the_gpu_too_long(client, ops, monkeypatch, caplog):
+    monkeypatch.setattr(serve, "_stuck_after", 5.0)
+    monkeypatch.setattr(serve, "_busy_since", time.monotonic() - 2)
+    assert client.get("/readyz").status_code == 200  # busy, but not for long
+    monkeypatch.setattr(serve, "_busy_since", time.monotonic() - 30)
+    monkeypatch.setattr(serve, "_last_not_ready", None)
+    with caplog.at_level("WARNING", logger="src.serve"):
+        got = client.get("/readyz")
+    assert got.status_code == 503 and got.json() == {"status": "not ready"}
+    assert "held the GPU for 30s (limit 5s)" in caplog.text and "held the GPU" not in got.text  # timing stays in the log
+
+
+def test_probe_and_metrics_routes_are_async_so_they_never_need_a_pool_thread():
+    """The design rule behind MAX_QUEUE_LIMIT. This checks the rule, not pool starvation itself, which the test client
+    cannot reproduce."""
+    import inspect
+
+    for route in (serve.healthz, serve.readyz, serve.metrics):
+        assert inspect.iscoroutinefunction(route), route.__name__
+
+
+def test_probes_answer_while_the_queue_is_full_and_the_gpu_is_held(client, ops, monkeypatch):
+    monkeypatch.setattr(serve, "_max_queue", 0)
+    with serve._gpu_lock:
+        assert client.post("/v1/systemone", json=REQUEST).status_code == 503
+        assert client.get("/healthz").status_code == 200 and client.get("/readyz").status_code == 200
+        assert client.get("/metrics").status_code == 200
+
+
+def test_metrics_report_requests_queue_gpu_and_cache(client, ops, monkeypatch):
+    client.post("/v1/systemone", json=REQUEST)  # a miss
+    client.post("/v1/systemone", json=REQUEST)  # a hit
+    client.post("/v1/systemone", json={})  # a 422
+    monkeypatch.setattr(serve, "_max_queue", 0)
+    with serve._gpu_lock:
+        client.post("/v1/systemone", json=REQUEST)  # a 503
+    got = client.get("/metrics")
+    assert got.status_code == 200 and got.headers["content-type"].startswith("text/plain; version=0.0.4")
+    text = got.text
+    assert 'pointwise_requests_total{route="/v1/systemone",status="200"} 2' in text
+    assert 'pointwise_requests_total{route="/v1/systemone",status="422"} 1' in text
+    assert 'pointwise_requests_total{route="/v1/systemone",status="503"} 1' in text
+    assert "pointwise_state_cache_hits_total 1" in text and "pointwise_state_cache_misses_total 1" in text
+    assert "pointwise_state_cache_entries 1" in text
+    n = len(serve._pointwise.encode(SystemOneRequest.model_validate(REQUEST)).state_ids)
+    assert f"pointwise_state_cache_tokens {n}" in text
+    assert "pointwise_ready 1" in text and "pointwise_queue_waiting 0" in text and "pointwise_gpu_busy_seconds 0" in text
+    assert re.search(r"pointwise_overload_rejections_total [1-9]", text)
+    assert 'pointwise_request_duration_seconds_count{route="/v1/systemone"} 4' in text
+    assert "Shoes arrived" not in text  # numbers only
+
+
+def test_the_api_key_protects_the_real_routes_and_not_the_probes(client, ops):
+    ops.api_key = "k-123"
+    assert client.get("/healthz").status_code == 200 and client.get("/readyz").status_code == 200
+    assert client.post("/v1/systemone", json=REQUEST).status_code == 401
+    assert client.post("/predict", json={"message": "hi"}).status_code == 401
+    assert client.get("/metrics").status_code == 401
+    assert client.get("/openapi.json").status_code == 401  # the schema is not public either
+    got = client.post("/v1/systemone", json=REQUEST, headers={"Authorization": "Bearer k-123"})
+    assert got.status_code == 200 and "x-request-id" in got.headers
+
+
+def test_a_bad_api_key_setting_stops_startup(tmp_path, monkeypatch):
+    weights, metrics = write_state(tmp_path)
+    monkeypatch.delenv("ADAPTER_DIR", raising=False)
+    monkeypatch.setenv("POINTWISE_WEIGHTS", weights)
+    monkeypatch.setenv("POINTWISE_METRICS", metrics)
+    monkeypatch.setattr(serve.OPS, "api_key", None)
+    for bad in ("", "   ", " padded ", "naïve-key"):
+        monkeypatch.setenv("POINTWISE_API_KEY", bad)
+        with pytest.raises(SystemExit, match="POINTWISE_API_KEY must be"):
+            serve.configure_from_env()
+    assert serve.OPS.api_key is None  # a rejected key is never half-applied
+    monkeypatch.setenv("POINTWISE_API_KEY", "ok-key")
+    monkeypatch.setenv("POINTWISE_STUCK_AFTER_S", "soon")
+    with pytest.raises(SystemExit, match="POINTWISE_STUCK_AFTER_S must be a number"):
+        serve.configure_from_env()
+
+
+def test_the_key_and_timings_are_read_from_the_environment(tmp_path, monkeypatch):
+    weights, metrics = write_state(tmp_path)
+    monkeypatch.delenv("ADAPTER_DIR", raising=False)
+    monkeypatch.setenv("POINTWISE_WEIGHTS", str(tmp_path / "missing.pt"))  # fails after the operations settings are read
+    monkeypatch.setenv("POINTWISE_METRICS", metrics)
+    monkeypatch.setenv("POINTWISE_API_KEY", "ok-key")
+    monkeypatch.setenv("POINTWISE_STUCK_AFTER_S", "12")
+    monkeypatch.setenv("POINTWISE_SHUTDOWN_GRACE_S", "7")
+    for name, value in (("api_key", None), ("draining", False)):
+        monkeypatch.setattr(serve.OPS, name, value)
+    monkeypatch.setattr(serve, "_stuck_after", serve._stuck_after)
+    monkeypatch.setattr(serve, "_shutdown_grace", serve._shutdown_grace)
+    with pytest.raises(SystemExit, match="POINTWISE_WEIGHTS must point"):
+        serve.configure_from_env()
+    assert (serve.OPS.api_key, serve._stuck_after, serve._shutdown_grace) == ("ok-key", 12.0, 7.0)
+
+
+def test_drain_waits_for_work_in_flight_then_returns(ops, monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(serve, "_shutdown_grace", 5.0)
+    serve._gpu_lock.acquire()  # a request is running
+    threading.Timer(0.2, serve._gpu_lock.release).start()
+    started = time.monotonic()
+    asyncio.run(serve._drain())
+    assert ops.draining and 0.15 < time.monotonic() - started < 4  # waited for it, did not run to the deadline
+
+
+def test_drain_gives_up_at_the_grace_period_and_says_so(ops, monkeypatch, caplog):
+    import asyncio
+
+    monkeypatch.setattr(serve, "_shutdown_grace", 30.0)
+    monkeypatch.setattr(ops, "drain_wait", 0.2)  # what serve_main sets: its share, the rest having gone to uvicorn
+    with serve._gpu_lock, caplog.at_level("WARNING", logger="src.serve"):
+        started = time.monotonic()
+        asyncio.run(serve._drain())
+    assert "gave up waiting after 0.2s" in caplog.text and time.monotonic() - started < 1
+
+
+def test_under_plain_uvicorn_the_drain_may_use_the_whole_grace(ops, monkeypatch, caplog):
+    import asyncio
+
+    monkeypatch.setattr(serve, "_shutdown_grace", 0.3)
+    monkeypatch.setattr(ops, "drain_wait", None)  # nobody split the budget
+    with serve._gpu_lock, caplog.at_level("WARNING", logger="src.serve"):
+        asyncio.run(serve._drain())
+    assert "gave up waiting after 0.3s" in caplog.text
+
+
+def test_drain_also_waits_for_requests_that_have_not_reached_the_gpu_yet(ops, monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(serve, "_shutdown_grace", 5.0)
+    monkeypatch.setattr(ops, "drain_wait", 1.0)
+    ops.inflight = 1  # a request still tokenising: no GPU lock, not in the queue
+    threading.Timer(0.2, lambda: setattr(ops, "inflight", 0)).start()
+    started = time.monotonic()
+    asyncio.run(serve._drain())
+    assert 0.15 < time.monotonic() - started < 0.9 and ops.draining
+
+
+def test_a_restarted_app_does_not_begin_life_draining(ops, model, monkeypatch):
+    monkeypatch.setattr(serve, "configure_from_env", lambda: None)
+    monkeypatch.setattr(serve, "_pointwise", model)
+    monkeypatch.setattr(serve, "_shutdown_grace", 0.5)
+    for _ in range(2):  # the first shutdown leaves the flag set; the second startup must clear it
+        with TestClient(serve.app) as c:
+            assert not ops.draining and c.get("/readyz").status_code == 200
+        assert ops.draining
+
+
+def test_a_draining_server_turns_data_requests_away_but_stays_observable(client, ops):
+    ops.draining = True
+    got = client.post("/v1/systemone", json=REQUEST)
+    assert got.status_code == 503 and got.headers["retry-after"] == "1"
+    ready = client.get("/readyz")
+    assert ready.status_code == 503 and ready.json() == {"status": "not ready"}
+    assert client.get("/healthz").status_code == 200 and client.get("/metrics").status_code == 200
+
+
+@pytest.mark.parametrize("bad", ["abc", "nan", "inf", "-5", "0", "1", "0.5", "2.99"])
+def test_the_runner_rejects_a_bad_grace_period_like_the_server_does(monkeypatch, bad):
+    from src.serve_main import build_server
+
+    monkeypatch.setenv("POINTWISE_SHUTDOWN_GRACE_S", bad)
+    with pytest.raises(SystemExit, match="POINTWISE_SHUTDOWN_GRACE_S must be"):
+        build_server()
+
+
+@pytest.mark.parametrize("grace", [3.0, 3.5, 5.0, 12.0, 25.0, 29.9, 61.7])
+def test_the_two_shutdown_waits_plus_the_margin_always_add_up_to_the_grace_period(grace):
+    from src.serve_ops import SHUTDOWN_MARGIN_S, split_grace
+
+    uvicorn_s, drain_s = split_grace(grace)
+    assert isinstance(uvicorn_s, int) and uvicorn_s >= 1 and drain_s >= 0
+    assert uvicorn_s + drain_s + SHUTDOWN_MARGIN_S == pytest.approx(grace)  # never over the budget an orchestrator allows
+
+
+def test_the_default_grace_leaves_room_under_kubernetes_default_kill_timeout():
+    from src.serve_ops import DEFAULT_SHUTDOWN_GRACE_S
+
+    assert DEFAULT_SHUTDOWN_GRACE_S < 30 and serve.DEFAULT_SHUTDOWN_GRACE_S == DEFAULT_SHUTDOWN_GRACE_S
+
+
+def test_a_shutdown_signal_that_arrives_before_the_app_starts_is_not_forgotten(ops, model, monkeypatch):
+    import signal
+
+    from src.serve_main import build_server
+
+    monkeypatch.setattr(ops, "signalled", False)
+    monkeypatch.setattr(serve, "configure_from_env", lambda: None)
+    monkeypatch.setattr(serve, "_pointwise", model)
+    monkeypatch.setattr(serve, "_shutdown_grace", 0.5)
+    build_server().handle_exit(signal.SIGTERM, None)  # SIGTERM during the slow import and model load
+    assert ops.signalled and ops.draining
+    with TestClient(serve.app) as c:  # the lifespan then starts: it must not clear what the signal set
+        assert ops.draining and c.get("/readyz").status_code == 503
+    monkeypatch.setattr(ops, "signalled", False)
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "65536", "70000", "x"])
+def test_the_runner_rejects_a_bad_port(monkeypatch, bad):
+    from src.serve_main import build_server
+
+    monkeypatch.setenv("POINTWISE_PORT", bad)
+    with pytest.raises(SystemExit, match="POINTWISE_PORT must be"):
+        build_server()
+
+
+def test_a_stuck_gpu_is_logged_once_not_once_per_probe_as_its_age_grows(client, ops, monkeypatch, caplog):
+    monkeypatch.setattr(serve, "_stuck_after", 5.0)
+    monkeypatch.setattr(serve, "_last_not_ready", None)
+    with caplog.at_level("WARNING", logger="src.serve"):
+        for age in (61, 71, 81, 9999):
+            monkeypatch.setattr(serve, "_busy_since", time.monotonic() - age)
+            assert client.get("/readyz").status_code == 503
+    assert caplog.text.count("readyz: not ready") == 1
+
+
+def test_extra_request_id_still_works_and_wins_over_the_current_one(caplog):
+    """A global record factory would make `extra={"request_id": ...}` raise KeyError; a logger filter does not."""
+    with caplog.at_level("INFO", logger="src.serve"):
+        logging.getLogger("src.serve").info("caller-supplied", extra={"request_id": "from-caller"})
+        logging.getLogger("src.serve").info("ambient")
+    ids = {r.getMessage(): r.request_id for r in caplog.records}
+    assert ids == {"caller-supplied": "from-caller", "ambient": "-"}
+    logging.getLogger("some.other.library").warning("fine", extra={"request_id": "x"})  # unaffected anywhere in the process
+
+
+def test_a_record_without_a_request_id_is_printed_with_a_dash_not_lost(capsys):
+    """The formatter configuration serve.py applies to its root handlers, on a record that lacks the attribute."""
+    import io
+
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter(serve._LOG_FORMAT, defaults={"request_id": "-"}))
+    handler.handle(logging.makeLogRecord({"msg": "replayed from a queue", "levelname": "INFO", "levelno": 20}))
+    assert "[-] replayed from a queue" in stream.getvalue() and "Logging error" not in capsys.readouterr().err
+
+
+def test_a_new_run_starts_with_a_clean_readyz_log_state(ops, model, monkeypatch):
+    monkeypatch.setattr(serve, "configure_from_env", lambda: None)
+    monkeypatch.setattr(serve, "_pointwise", model)
+    monkeypatch.setattr(serve, "_shutdown_grace", 0.5)
+    monkeypatch.setattr(serve, "_last_not_ready", "held the GPU for Ns")  # left over from an earlier incident
+    with TestClient(serve.app):
+        assert serve._last_not_ready is None  # so a second incident is logged again
+
+
+def test_the_lifespan_drains_on_shutdown(ops, monkeypatch):
+    monkeypatch.setattr(serve, "configure_from_env", lambda: None)
+    monkeypatch.setattr(serve, "_shutdown_grace", 1.0)
+    with TestClient(serve.app) as c:  # startup and shutdown both run
+        assert c.get("/healthz").status_code == 200 and not ops.draining
+    assert ops.draining
+
+
+def test_the_runner_starts_draining_at_the_shutdown_signal_before_uvicorn_stops(ops, monkeypatch):
+    import signal
+
+    from src.serve_main import build_server
+
+    monkeypatch.setenv("POINTWISE_SHUTDOWN_GRACE_S", "12")
+    monkeypatch.setattr(ops, "drain_wait", None)
+    server = build_server()
+    # 1 s held back, 80% of the other 11 s for uvicorn (8 s), and exactly the rest (3 s) for the server's own drain
+    assert server.config.timeout_graceful_shutdown == 8 and ops.drain_wait == 3.0
+    assert server.config.workers == 1 and not server.config.access_log
+    assert not ops.draining and not server.should_exit
+    server.handle_exit(signal.SIGTERM, None)
+    assert ops.draining and ops.signalled and server.should_exit
+    monkeypatch.setattr(ops, "signalled", False)
+
+
+def test_a_bug_in_a_route_is_a_500_with_a_request_id_on_the_real_app(client, ops, monkeypatch, caplog):
+    monkeypatch.setattr(serve, "readiness", lambda: (_ for _ in ()).throw(RuntimeError("secret internal detail")))
+    with caplog.at_level("INFO", logger="src.serve"):
+        got = client.get("/readyz", headers={"X-Request-Id": "find-me"})
+    assert got.status_code == 500 and got.headers["x-request-id"] == "find-me"
+    assert got.json() == {"detail": {"error": "internal_error"}} and "secret" not in got.text + caplog.text
+    assert any(r.request_id == "find-me" and "unhandled RuntimeError" in r.getMessage() for r in caplog.records)
 
 
 def test_an_unexpected_failure_is_a_generic_500_that_leaks_nothing(client, monkeypatch):

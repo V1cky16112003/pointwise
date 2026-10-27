@@ -125,7 +125,9 @@ src/evaluate_core.py  # shared metrics (ECE, Brier, AURC, coverage), CI-tested w
 scripts/kaggle_job.py # the job the Kaggle notebook runs (currently the Phase 6 latency measurement)
 scripts/phase6_latency.py  # cold / cached / merged serving latency on one T4
 scripts/count_tokens.py    # token counts per request shape (reports/pointwise-tokens.md)
-src/serve.py          # FastAPI: /v1/systemone (Pointwise, state-prefix cache) and the Phase 0 /predict
+src/serve.py          # FastAPI: /v1/systemone (Pointwise, state-prefix cache), /healthz /readyz /metrics, Phase 0 /predict
+src/serve_ops.py      # request ids, optional API key, drain flag, metrics middleware
+src/serve_main.py     # `python -m src.serve_main`: one-process runner that starts draining at SIGTERM
 scripts/phase5_eval.py   # all arms on one T4; scripts/phase5_report.py builds reports/ from its output
 src/pointwise/baselines.py, compare.py  # no-training scoring; arm alignment and paired bootstrap
 reports/              # pointwise-results.md (python -m scripts.phase5_report --input artifacts/phase5)
