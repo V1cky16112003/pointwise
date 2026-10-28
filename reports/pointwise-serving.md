@@ -103,3 +103,33 @@ gets close but does not reach it.
   latency script builds the model the same way and sets T = 1.5159, but it is not the endpoint. The endpoint itself was
   tested only with a tiny random model (`tests/test_pointwise_serving.py`).
 - The latency job was run once; there are no intervals across sessions.
+
+## Step 4 result: same-session A/B (`reports/coldpath_ab.json`)
+
+One T4 session, one 524-token state, k=8, 60 interleaved rounds after 5 warm-up; ratios to the old default (cold, unmerged).
+
+| Path | median | p95 | p95 ratio | vs 150 ms p95 |
+|---|---|---|---|---|
+| cold, unmerged (old default) | 212.7 | 233.4 | 1.00 | not met by 83.4 |
+| miss, unmerged, old two-pass | 277.4 | 295.3 | 1.27 | not met by 145.3 |
+| miss, unmerged, new one-pass | 212.6 | 234.2 | 1.00 | not met by 84.2 |
+| cached, unmerged | 85.5 | 90.0 | 0.39 | met |
+| **cold, merged (new default)** | 143.7 | 160.4 | 0.69 | **not met by 10.4** |
+| miss, merged, old two-pass | 197.1 | 220.7 | 0.95 | not met by 70.7 |
+| **miss, merged, new one-pass** | 149.7 | 170.1 | 0.73 | **not met by 20.1** |
+| cached, merged | 52.2 | 58.4 | 0.25 | met |
+
+- **Kept change (b), one-pass miss:** p95 295.3 -> 234.2 ms unmerged (-21%), 220.7 -> 170.1 merged (-23%); a miss now
+  costs what a cold request costs (unmerged medians 212.6 vs 212.7).
+- **Kept change (d), merged by default:** cold p95 233.4 -> 160.4 ms (-31%); passed the held-out check (99.96% top
+  option, OOD ECE +0.0006, `reports/merged_check.json`).
+- **Together:** the default cold request goes from 233.4 to 160.4 ms p95 and the default miss from 295.3 to 170.1.
+- **Target not met cold:** merged cold misses 150 ms p95 by 10.4 ms (median 143.7 is under it). Of the ~150 ms, ~138 ms
+  is the 28 decoder layers doing real GPU work on 680 tokens (profile: 32% idle); encode + mask + head + answers are ~7 ms.
+  What is left would need fewer FLOPs (a smaller model, fp8/int8 weights, a faster GPU), not less Python; per-call
+  launch overhead is not what dominates cold, so CUDA graphs (c) were not tried.
+- **Correctness on run 3's weights** (104 records: the 4 latency requests + 100 held-out, 115 questions, against the old
+  unmerged uncached path): new miss max prob diff 0.0000, hit 0.0014, merged cold/miss/hit 0.0037/0.0037/0.0038, old
+  miss 0.0034; no top option changed on any path. Cache hit/miss/eviction tests green.
+- The p95s here are higher than the profile session's (cold unmerged 233 vs 204): T4 sessions drift, so only the ratios
+  within this table are compared.

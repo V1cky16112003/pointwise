@@ -209,6 +209,15 @@ true distribution, and why one-hot training still ends up overconfident.
   - Cost of the T4 job: no data build, one model load, six configurations x four k x 65 requests. The estimate was
     15-20 minutes, about 0.3 GPU-h; the actual session time was not measured here.
 
+- **Step 4 log (2026-10-28, cold-path latency).** Profile (Kaggle, commit ef86f40, `reports/pointwise-coldpath.md`):
+  cold k=8 p95 204 ms unmerged / 154 merged, miss 295 / 198, cached 111 / 63; backbone layers 192 of 202 ms (median)
+  unmerged; mask 0.7 ms, so the Q x L mask (candidate a) was dropped; miss = prefill + cached + 4 ms (no hidden 65 ms:
+  two passes); cached path launch-bound (~75% GPU idle). Merged check (plan step 5, `reports/merged_check.json`): top
+  option 99.96%, OOD ECE 0.0570 -> 0.0576 on the served path: passes. Kept (bdd2c6f): one-pass miss (b), merged default
+  (d). CUDA graphs (c) not tried: the cold path is GPU-bound. A/B (same session, `reports/coldpath_ab.json`, p95):
+  cold 233.4 -> 160.4 ms (merged; 150 ms target missed by 10.4), miss 295.3 -> 170.1, cached merged 58.4; max prob
+  diff 0.0038, no top-option flips on 115 questions. Remaining ~138 ms is GPU compute in the 28 layers.
+
 ## Phase 7 — Stretch
 - RLCD stage 2 with rationales (OpenJev Algorithm 1) on a reasoning task.
 - >255 options via 2-stage Noul scoring → Choice.

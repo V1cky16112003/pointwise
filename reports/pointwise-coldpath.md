@@ -49,9 +49,6 @@ Merging computes W' = W + B·A once and stores W' in fp16, which keeps about 3 s
 instead computes x·W (fp16) and x·A·B (fp32) separately and adds them. The two orders round differently, which is the
 0.064 max logit difference above; it changed one top answer in 2,500.
 
-## Next (A/B in one session)
+## Result
 
-- (b) On a miss, run the one packed pass a cold request runs, and keep the state rows' KV from it (exact: state tokens only
-  attend to state tokens). Expected: miss ≈ cold, about 200 ms unmerged / 150 ms merged instead of 288 / 195.
-- (d) Serve merged by default (passes above): cold p95 153.6 ms, 3.6 ms over the target in this session.
-- (c) CUDA graphs only for the cached path, if (b) and (d) leave the cold target unmet by more than noise.
+See `reports/pointwise-serving.md`, "Step 4 result": default cold p95 233 -> 160 ms, miss 295 -> 170 ms, same session; cold target missed by 10.4 ms.

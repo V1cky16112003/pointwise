@@ -1,0 +1,115 @@
+{
+ "k": 8,
+ "state_tokens": 524,
+ "timing": {
+  "cold_unmerged": {
+   "n": 60,
+   "median": 212.69595199999003,
+   "mean": 215.9805456999815,
+   "p95": 233.44742299991594,
+   "max": 239.0775129999838,
+   "median_ratio": 1.0,
+   "p95_ratio": 1.0
+  },
+  "miss_old_unmerged": {
+   "n": 60,
+   "median": 277.3692734999713,
+   "mean": 279.0675005499944,
+   "p95": 295.3435480000053,
+   "max": 300.8776599999692,
+   "median_ratio": 1.3040646561058402,
+   "p95_ratio": 1.2651394656865054
+  },
+  "miss_new_unmerged": {
+   "n": 60,
+   "median": 212.62422600000264,
+   "mean": 215.44501038332933,
+   "p95": 234.21318300006533,
+   "max": 237.66306200002418,
+   "median_ratio": 0.9996627768450084,
+   "p95_ratio": 1.0032802246874648
+  },
+  "cached_unmerged": {
+   "n": 60,
+   "median": 85.48768800000062,
+   "mean": 85.84917831666228,
+   "p95": 89.98218299996097,
+   "max": 95.36864599999717,
+   "median_ratio": 0.4019243770093219,
+   "p95_ratio": 0.38544945942707354
+  },
+  "cold_merged": {
+   "n": 60,
+   "median": 143.74153700003944,
+   "mean": 145.20056900000404,
+   "p95": 160.37451399995462,
+   "max": 162.47334700005922,
+   "median_ratio": 0.6758075818953347,
+   "p95_ratio": 0.6869834412351271
+  },
+  "miss_old_merged": {
+   "n": 60,
+   "median": 197.11275800000294,
+   "mean": 199.9415841666651,
+   "p95": 220.65832999999202,
+   "max": 223.75451399989288,
+   "median_ratio": 0.9267348821006813,
+   "p95_ratio": 0.945216388188922
+  },
+  "miss_new_merged": {
+   "n": 60,
+   "median": 149.73339199997326,
+   "mean": 152.85266798333623,
+   "p95": 170.08714799999325,
+   "max": 171.13256599998294,
+   "median_ratio": 0.7039785693710818,
+   "p95_ratio": 0.7285886724054971
+  },
+  "cached_merged": {
+   "n": 60,
+   "median": 52.23522449995244,
+   "mean": 52.781466899998954,
+   "p95": 58.368929000039316,
+   "max": 58.93859399998291,
+   "median_ratio": 0.2455863593490246,
+   "p95_ratio": 0.2500302991139051
+  }
+ },
+ "correctness": {
+  "old_miss_vs_reference": {
+   "max_prob_diff": 0.003427863121032715,
+   "top_option_flips": 0,
+   "questions": 115
+  },
+  "miss_unmerged_vs_reference": {
+   "max_prob_diff": 0.0,
+   "top_option_flips": 0,
+   "questions": 115
+  },
+  "hit_unmerged_vs_reference": {
+   "max_prob_diff": 0.0014191865921020508,
+   "top_option_flips": 0,
+   "questions": 115
+  },
+  "cold_merged_vs_reference": {
+   "max_prob_diff": 0.0037070512771606445,
+   "top_option_flips": 0,
+   "questions": 115
+  },
+  "miss_merged_vs_reference": {
+   "max_prob_diff": 0.0037070512771606445,
+   "top_option_flips": 0,
+   "questions": 115
+  },
+  "hit_merged_vs_reference": {
+   "max_prob_diff": 0.003768742084503174,
+   "top_option_flips": 0,
+   "questions": 115
+  }
+ },
+ "correctness_records": 104,
+ "env": {
+  "torch": "2.11.0+cu128",
+  "gpu": "Tesla T4"
+ }
+}

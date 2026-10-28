@@ -87,6 +87,13 @@ One 524-token state and 8 three-option questions, p95 over 60 requests, against 
   on one state, with no top option changed (the merged-and-cached case was not checked). Each cell times the same request 60
   times; HTTP, concurrency and other state lengths were not measured.
 
+Step 4 (cold-path latency, `reports/pointwise-coldpath.md`) profiled a request into stages on one T4. The 28 backbone
+layers are ~95% of a cold request, the LoRA adapter costs ~51 ms of it, and a cache miss was slow because it read the
+state twice. Two changes kept: a miss now runs one packed pass and stores the state from it, and the adapter is merged
+by default (`POINTWISE_MERGE_LORA=0` to opt out; merged agreed with unmerged on 99.96% of 2,500 held-out questions, OOD ECE
++0.0006). Same session (`reports/pointwise-serving.md`): default cold p95 233 -> 160 ms (target 150, missed by 10.4; median 144),
+cache miss 295 -> 170 ms, cached 58 ms; no top option changed on 115 questions on the real weights.
+
 ## Token efficiency
 
 Pointwise reads the state once, however many questions are asked about it, so with several questions on one state it needs fewer model input tokens. Counted with the Qwen3 tokenizer on the
