@@ -7,8 +7,8 @@ to the real path, not a copy of it:
   encode        tokenising and laying out the request (CPU)
   mask          building the additive block attention mask (block_mask_batch)
   packed        the cold path's one forward pass over state + questions
-  prefill       a miss's forward pass over the state alone, keeping its KV
-  questions_on_kv  the questions' forward pass on top of the stored state KV (miss and cached)
+  prefill       (before step 4 b only) a miss's pass over the state alone; a miss is now one packed pass
+  questions_on_kv  the questions' forward pass on top of the stored state KV (cached)
   .../mask, .../layer  inside those: mask building, and the decoder layers summed (per-layer median printed apart)
   head          the pointer head on the question features
   answers       turning probabilities into the response body
@@ -20,7 +20,7 @@ request per configuration also runs under torch.profiler, to count kernels and s
 
 Configurations, adapter unmerged then merged (merging is in place): cold (no cache), miss (cache on, emptied before
 each request) and cached (state already stored). Median and p95 over REPS requests after WARMUP. The miss row is
-accounted against prefill + cached: miss - (its prefill + the cached request) is the cost a miss adds on top.
+accounted against a cold request (one-pass miss), or prefill + cached on the old two-pass path.
 Usage: python -m scripts.phase6_profile --state <run 3 state.pt> --output-dir <dir>
 """
 from __future__ import annotations
@@ -122,6 +122,8 @@ def instrumented(model: DecisionModel, rec_box: list[Recorder]):
         packed = wrap("packed", packing.packed_forward)
         stack.enter_context(mock.patch.object(packing, "packed_forward", packed))
         stack.enter_context(mock.patch.object(model_module, "packed_forward", packed))  # the cold path's own import
+        stack.enter_context(mock.patch.object(packing, "packed_with_state_cache",
+                                              wrap("packed", packing.packed_with_state_cache)))  # a miss since step 4 (b)
         stack.enter_context(mock.patch.object(model, "_head_logits", wrap("head", model._head_logits)))
         stack.enter_context(mock.patch.object(model_module, "to_answers", wrap("answers", model_module.to_answers)))
         handles = []
@@ -210,6 +212,10 @@ def miss_accounting(configs: dict, suffix: str) -> dict:
     """Medians: what a miss costs beyond prefilling the state and then serving it as a cached request. Walls are the
     uninstrumented ones; prefill is its GPU span (the only clock for one stage), so its CPU-only cost lands in extra."""
     miss, cached = configs[f"miss{suffix}"], configs[f"cached{suffix}"]
+    if "prefill" not in miss["stages"]:  # one-pass miss (step 4 b): compare with a cold request instead
+        cold = configs[f"cold{suffix}"]["wall_uninstrumented"]["median"]
+        return {"miss_ms": miss["wall_uninstrumented"]["median"], "cold_ms": cold,
+                "extra_ms": miss["wall_uninstrumented"]["median"] - cold}
     prefill = miss["stages"]["prefill"]["gpu"]["median"]
     extra = miss["wall_uninstrumented"]["median"] - prefill - cached["wall_uninstrumented"]["median"]
     q_miss = miss["stages"]["questions_on_kv"]["gpu"]["median"]
@@ -241,7 +247,9 @@ def table(result: dict) -> str:
                          f"{kn['profiled_wall_ms']:.1f} ms ({100 * kn['launch_bound_share']:.0f}% idle, waiting on the CPU).")
         lines.append("")
     for key, acc in result.items():
-        if key.startswith("miss_accounting"):
+        if key.startswith("miss_accounting") and "cold_ms" in acc:
+            lines.append(f"- {key}: one-pass miss {acc['miss_ms']:.1f} vs cold {acc['cold_ms']:.1f} ms (extra {acc['extra_ms']:.1f})")
+        elif key.startswith("miss_accounting"):
             lines.append(f"- {key}: miss {acc['miss_ms']:.1f} = prefill {acc['prefill_ms']:.1f} + cached {acc['cached_ms']:.1f} "
                          f"+ extra {acc['extra_ms']:.1f} ms; questions-on-KV pass {acc['questions_on_kv_miss_ms']:.1f} on a miss "
                          f"vs {acc['questions_on_kv_cached_ms']:.1f} cached")

@@ -1,0 +1,23 @@
+{
+ "questions": 2500,
+ "top_agreement": 0.9996,
+ "ood_ece_unmerged": 0.056958184952646596,
+ "ood_ece_merged": 0.05758887069368356,
+ "ece_shift": 0.0006306857410369668,
+ "max_logit_diff": 0.06389689445495605,
+ "ship_merged": true,
+ "heldout_unmerged": {
+  "n": 2500,
+  "accuracy": 0.6676,
+  "nll": 0.978145175636875,
+  "brier": 0.46249807120828973,
+  "ece": 0.06621617068027329
+ },
+ "heldout_merged": {
+  "n": 2500,
+  "accuracy": 0.6676,
+  "nll": 0.9780682993010988,
+  "brier": 0.4625005640757643,
+  "ece": 0.06622735351053598
+ }
+}

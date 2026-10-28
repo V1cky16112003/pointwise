@@ -66,8 +66,8 @@ def env_float(name: str, default: float, minimum: float = 0.0) -> float:
     return value
 
 
-def env_flag(name: str) -> bool:
-    value = os.environ.get(name, "0")
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name, "1" if default else "0")
     if value not in ("0", "1"):
         sys.exit(f"FATAL: {name} must be 0 or 1, got {value!r}.")
     return value == "1"

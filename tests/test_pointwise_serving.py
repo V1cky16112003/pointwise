@@ -1023,3 +1023,25 @@ def test_token_ratios_are_generate_and_parse_over_pointwise():
     got = ratios(state=500, questions=[20, 20, 20, 20], prompts=[520] * 4)
     assert (got["one_pass"], got["cached"], got["generate_and_parse"]) == (580, 80, 2080)
     assert got["x_one_pass"] == pytest.approx(2080 / 580) and got["x_cached"] == pytest.approx(26.0)
+
+
+def test_a_miss_runs_one_backbone_pass_and_stores_only_the_state(model, monkeypatch):
+    """Step 4 (b): a miss reads state + questions once, like a cold request, not prefill then questions."""
+    calls = []
+    forward = model.backbone.forward
+    monkeypatch.setattr(model.backbone, "forward", lambda *a, **kw: calls.append(1) or forward(*a, **kw))
+    cache = StateCache()
+    encoded = model.encode(SystemOneRequest.model_validate(REQUEST))
+    model.probs(encoded, cache)
+    assert len(calls) == 1
+    (stored, n), = cache._entries.values()
+    assert n == len(encoded.state_ids) and all(layer.keys.shape[-2] == n for layer in stored.layers)
+
+
+def test_adapter_is_merged_unless_switched_off(monkeypatch):
+    from src.serve_ops import env_flag
+
+    monkeypatch.delenv("POINTWISE_MERGE_LORA", raising=False)
+    assert env_flag("POINTWISE_MERGE_LORA", default=True)
+    monkeypatch.setenv("POINTWISE_MERGE_LORA", "0")
+    assert not env_flag("POINTWISE_MERGE_LORA", default=True)

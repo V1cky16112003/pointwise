@@ -123,6 +123,26 @@ def packed_forward(model: PreTrainedModel, batch: list[Packed], pad_id: int) -> 
 
 
 @torch.no_grad()
+def packed_with_state_cache(model: PreTrainedModel, packed: Packed) -> tuple[list[torch.Tensor], DynamicCache]:
+    """packed_features, also keeping the state's KV: one pass instead of prefill + branch (a cache miss). Exact for
+    the same reason prefill_state is: state rows attend only to earlier state rows, so their keys and values are
+    unchanged by the questions after them. The question rows are cut off and the state copied out, so the stored
+    cache holds only the state's memory."""
+    out = model(
+        input_ids=torch.tensor([packed.ids], device=model.device),
+        position_ids=torch.tensor([packed.positions], device=model.device),
+        attention_mask=block_mask(packed.segments, _model_dtype(model), model.device),
+        use_cache=True,
+    )
+    cache = out.past_key_values
+    for layer in cache.layers:
+        layer.keys = layer.keys[..., : packed.state_len, :].contiguous()
+        layer.values = layer.values[..., : packed.state_len, :].contiguous()
+    feats = _features(out)[0]
+    return [feats[s:e] for s, e in packed.question_spans], cache
+
+
+@torch.no_grad()
 def packed_features(model: PreTrainedModel, packed: Packed) -> list[torch.Tensor]:
     """One forward pass over state + all questions. -> per question [len_q, F]."""
     return packed_forward(model, [packed], pad_id=0)[0]
@@ -208,7 +228,10 @@ class StateCache:
     Qwen3-1.7B in fp16, so a 512-token state is ~57 MB): `max_entries` states and `max_tokens` state tokens
     in total; the least recently used go first, and a state longer than `max_tokens` is never stored.
     Not thread-safe: one request at a time (the model is on one GPU anyway), so callers hold a lock.
-    A request grows the stored tensors with torch.cat (new tensors; the stored ones are never written to), so
+    A miss runs one packed pass, as a cold request, and stores the state rows' KV from it (packed_with_state_cache);
+    shortcut: that pass builds the full L x L mask, so a miss costs a cold request's memory too, when large states OOM
+    go back to prefill_state + branch_features for long requests.
+    A hit grows the stored tensors with torch.cat (new tensors; the stored ones are never written to), so
     after it the stored references are put back: an entry then holds just its state (see nbytes), with no copy."""
 
     def __init__(self, max_entries: int = 8, max_tokens: int = 16384):
@@ -240,10 +263,15 @@ class StateCache:
         entry = self._entries.pop(key, None)  # popped, then re-inserted below as the most recent
         self.hits += entry is not None
         self.misses += entry is None
-        cache = entry[0] if entry else prefill_state(model, state_ids)
+        if entry is None:  # one packed pass, as a cold request, keeping the state's KV: a miss costs what cold costs
+            features, cache = packed_with_state_cache(model, packed)
+        else:
+            cache = entry[0]
         self._entries[key] = (cache, packed.state_len)
         while len(self._entries) > self.max_entries or sum(n for _, n in self._entries.values()) > self.max_tokens:
             self._entries.popitem(last=False)
+        if entry is None:
+            return features
         stored = [(layer.keys, layer.values) for layer in cache.layers]
         try:
             return branch_features(model, cache, packed)

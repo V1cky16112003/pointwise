@@ -62,6 +62,27 @@ def timed(fn, device, reps: int, warmup: int, before=lambda: None) -> dict:
     return summarise(samples)
 
 
+def interleaved(variants: dict, device, reps: int = REPS, warmup: int = WARMUP) -> dict:
+    """Same-session A/B: {name: (fn, before)} timed in turn, round after round, so drift in the GPU's clock or a
+    noisy neighbour hits every variant alike. -> per variant summarise(), plus each one's median and p95 as a
+    ratio of the first variant's (the baseline)."""
+    samples: dict[str, list[float]] = {name: [] for name in variants}
+    for i in range(warmup + reps):
+        for name, (fn, before) in variants.items():
+            before()
+            sync(device)
+            start = time.perf_counter()
+            fn()
+            sync(device)
+            if i >= warmup:
+                samples[name].append(1000 * (time.perf_counter() - start))
+    out = {name: summarise(s) for name, s in samples.items()}
+    base = out[next(iter(out))]
+    for row in out.values():
+        row["median_ratio"], row["p95_ratio"] = row["median"] / max(base["median"], 1e-9), row["p95"] / max(base["p95"], 1e-9)
+    return out
+
+
 def requests_for(state: str, ks) -> dict[int, SystemOneRequest]:
     from scripts.bench_decide import shared_state_request
 
@@ -93,7 +114,7 @@ def measure(model: DecisionModel, state: str, ks=KS, reps: int = REPS, warmup: i
     miss, hit = [], []
     for k, e in encoded.items():
         fresh = StateCache()
-        miss.append(agreement(model.probs(e, fresh), reference[k]))  # prefill, then the questions
+        miss.append(agreement(model.probs(e, fresh), reference[k]))  # one packed pass that also stores the state (step 4 b)
         hit.append(agreement(model.probs(e, fresh), reference[k]))  # the stored state, as a second request sees it
     out["agreement"] = {"cache_miss_vs_uncached": pooled(miss), "cache_hit_vs_uncached": pooled(hit)}
 

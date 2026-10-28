@@ -4,7 +4,7 @@ premise 4) — a local demo for interview purposes.
 Two models, each switched on by an env var, at least one required:
 - ADAPTER_DIR: the Phase 0 Banking77 classifier at POST /predict.
 - POINTWISE_WEIGHTS (+ POINTWISE_METRICS for T): the Pointwise decision model at POST /v1/systemone
-  (Phase 6), with a state-prefix cache. Optional: POINTWISE_DEVICE, POINTWISE_MERGE_LORA=1,
+  (Phase 6), with a state-prefix cache. Optional: POINTWISE_DEVICE, POINTWISE_MERGE_LORA (default 1: adapter merged, reports/pointwise-coldpath.md),
   POINTWISE_CACHE_ENTRIES, POINTWISE_CACHE_TOKENS, and the request limits POINTWISE_MAX_STATE_TOKENS (default 4096),
   POINTWISE_MAX_REQUEST_TOKENS (8192, state plus every question) and POINTWISE_MAX_QUESTIONS (32).
   POINTWISE_MAX_BODY_BYTES (1 MiB; over it a 413 before any parsing). Overload: POINTWISE_MAX_QUEUE (16 requests
@@ -206,7 +206,7 @@ class BodyLimit:
         await self.app(scope, limited_receive, send)
 
 
-def load_pointwise(weights: str, metrics: str, device: str | None = None, merge_lora: bool = False,
+def load_pointwise(weights: str, metrics: str, device: str | None = None, merge_lora: bool = True,
                    cache_entries: int = DEFAULT_CACHE_ENTRIES, cache_tokens: int = DEFAULT_CACHE_TOKENS,
                    max_state_tokens: int = DEFAULT_MAX_STATE_TOKENS, max_request_tokens: int = DEFAULT_MAX_REQUEST_TOKENS,
                    max_questions: int = DEFAULT_MAX_QUESTIONS) -> None:
@@ -249,7 +249,7 @@ def load_pointwise(weights: str, metrics: str, device: str | None = None, merge_
     _pointwise = model.eval()
     _state_cache = StateCache(cache_entries, cache_tokens)
     logger.info(f"Pointwise loaded on {device}: step {state.get('step')}, T={temperature:.3f}, merged={merge_lora}"
-                + (" (T was fitted on the unmerged model; see scripts/phase6_latency.py for the drift)" if merge_lora else ""))
+                + (" (T was fitted unmerged; merged passed reports/merged_check.json)" if merge_lora else ""))
 
 
 def configure_from_env() -> None:
@@ -277,7 +277,7 @@ def configure_from_env() -> None:
             weights,
             os.environ.get("POINTWISE_METRICS", ""),
             os.environ.get("POINTWISE_DEVICE"),
-            _env_flag("POINTWISE_MERGE_LORA"),
+            _env_flag("POINTWISE_MERGE_LORA", default=True),  # merged passed the step 4 check
             _env_int("POINTWISE_CACHE_ENTRIES", DEFAULT_CACHE_ENTRIES),
             _env_int("POINTWISE_CACHE_TOKENS", DEFAULT_CACHE_TOKENS),
             _env_int("POINTWISE_MAX_STATE_TOKENS", DEFAULT_MAX_STATE_TOKENS),
