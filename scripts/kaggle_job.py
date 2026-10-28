@@ -5,13 +5,15 @@ branch, installs dependencies, finds the Banking77 adapter and calls this
 module, so the job is chosen in git and a new job needs no notebook edits:
 change the job below, push, then Save & Run All on Kaggle.
 
-Current job: Phase 6 serving latency (docs/designs/pointwise-plan.md). No training, no data build, so no DATA_DIR.
+Current job: cold-path profile and merged-model check (plan step 4, docs/designs/pointwise-plan.md). No training.
 1. Find Phase 4 run 3's best weights first, before any slow step: any state.pt under /kaggle/input (the
    pointwise-run3-weights dataset, or notebook version 12, session 358167213). Only one at run 3's best step is accepted.
 2. Remove Kaggle's preinstalled torchao and check that LoRA can be applied (preflight).
-3. Run scripts.phase6_latency on one GPU: one ~512-token state and k = 1/2/4/8 questions, median and p95 over 60 requests,
-   for a cold state, a cached state and a cache miss, with the adapter unmerged and merged.
-The Phase 5 evaluation job is in git history at a9b86a0, the Phase 4 training job (runs 2-5) at b4c10e7.
+3. Run scripts.phase6_profile on one GPU: a cold, cache-miss and cached k=8 request split into stages, 60 requests
+   each, adapter unmerged and merged.
+4. Rebuild the Phase 3 data into DATA_DIR with run 3's settings (train cap 2,000, as Phase 5 did), then run
+   scripts.merged_check: the 2,500 Phase 5 held-out questions scored unmerged and merged.
+The Phase 6 latency job is in git history at 0d56b95, Phase 5 evaluation at a9b86a0, Phase 4 training at b4c10e7.
 
 Usage: python -m scripts.kaggle_job --adapter-dir <dir> --output-dir <dir>
 """
@@ -22,6 +24,8 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+
+DATA_DIR = "/tmp/pointwise-data-run7"
 
 PREFLIGHT = """
 import torch, transformers
@@ -74,9 +78,13 @@ def main() -> None:
     run([sys.executable, "-m", "pip", "uninstall", "-y", "-q", "torchao"], env)
     if run([sys.executable, "-c", PREFLIGHT], env):
         sys.exit("preflight failed: LoRA can't be applied in this environment")
-    code = run([sys.executable, "-m", "scripts.phase6_latency", "--state", str(state), "--output-dir", args.output_dir], env)
-    if code:
-        sys.exit(f"phase 6 latency failed (exit {code})")
+    if run([sys.executable, "-m", "scripts.phase6_profile", "--state", str(state), "--output-dir", args.output_dir], env):
+        sys.exit("cold-path profile failed")
+    if run([sys.executable, "-m", "src.pointwise.data.build", "--out", DATA_DIR, "--train-cap", "2000"], env):
+        sys.exit("data build failed")
+    if run([sys.executable, "-m", "scripts.merged_check", "--data-dir", DATA_DIR, "--state", str(state),
+            "--output-dir", args.output_dir], env):
+        sys.exit("merged-model check failed")
 
 
 if __name__ == "__main__":

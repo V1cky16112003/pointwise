@@ -141,10 +141,21 @@ def table(result: dict) -> str:
     return "\n".join(lines + [""] + gate)
 
 
-def main() -> None:
-    from scripts.bench_packing import build_request
+def load_run3(state_path: Path) -> DecisionModel:
+    """Run 3's best weights on the GPU, unmerged, at its fitted temperature."""
     from scripts.phase5_eval import RUN3_BEST_STEP
     from src.pointwise import train as T
+
+    model = T.build_model(T.parse_args(["--data-dir", ".", "--output-dir", "."]), torch.device("cuda"))
+    state = torch.load(state_path, map_location="cpu", weights_only=True)
+    assert state["step"] == RUN3_BEST_STEP, f"state.pt is step {state['step']}, not run 3's best step {RUN3_BEST_STEP}"
+    T.load_trainable(model, state)
+    model.head.temperature = RUN3_TEMPERATURE
+    return model.eval()
+
+
+def main() -> None:
+    from scripts.bench_packing import build_request
 
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--state", type=Path, required=True, help="run 3's best/state.pt")
@@ -153,13 +164,7 @@ def main() -> None:
 
     if not torch.cuda.is_available():
         raise SystemExit("no GPU: these numbers are judged against a T4 target, so refusing to write CPU timings")
-    device = torch.device("cuda")
-    model = T.build_model(T.parse_args(["--data-dir", ".", "--output-dir", "."]), device)
-    state = torch.load(args.state, map_location="cpu", weights_only=True)
-    assert state["step"] == RUN3_BEST_STEP, f"state.pt is step {state['step']}, not run 3's best step {RUN3_BEST_STEP}"
-    T.load_trainable(model, state)
-    model.head.temperature = RUN3_TEMPERATURE
-    model.eval()
+    model = load_run3(args.state)
     ids, _ = build_request(model.tokenizer, 512, 1)
     result = measure(model.eval(), model.tokenizer.decode(ids))
     result["env"] = {"torch": torch.__version__, "gpu": torch.cuda.get_device_name(0)}
