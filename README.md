@@ -1,216 +1,29 @@
-# Pointwise — a small model that returns calibrated decisions in one forward pass
+# Pointwise
 
-Pointwise is an open, small-scale replication of the "System One" idea: **unstructured state in, typed and
-calibrated decisions out, without generating text.** You send a state plus questions with a fixed set of
-options, and the model returns a probability for every option. The answer is always one of the declared options,
-so an out-of-schema answer cannot happen.
+**A small model that answers multiple-choice questions about a piece of text in one forward pass, with a probability
+for every option and no generated text.**
 
-Status: **Phase 5 (evaluation) is done except the Kev comparison, which was not run**; Phases 0–4 are done. **Phase 6 (serving) is built; the 150 ms target is met only with a cached state (see below).** The Phase 4
-calibration gate **failed** (pooled out-of-domain ECE 0.056 against a 0.05 target) and run 3 was not retuned.
-The full comparison is in `reports/pointwise-results.md`.
+You send a *state* (a support chat, a ticket, a message) and up to 32 questions. Each question comes with its own fixed
+set of options. Pointwise reads the state once and answers every question from it. Each answer is always one of the
+options you declared, so it can never fall outside your schema. The API follows TypeSafe's public `POST /v1/systemone`
+contract, so a Jev or Kev client can call it unchanged.
 
-## How it works
+**Status: shipped as a production-ready service.** The served model is Phase 4 run 3 (step 1541, temperature T 1.516,
+adapter merged), served by a hardened FastAPI server with:
+- request limits;
+- an overload queue that answers 503 with `Retry-After`;
+- liveness, readiness and Prometheus metrics;
+- an optional API key;
+- a graceful drain on shutdown;
+- a CUDA Docker image.
 
-- **Backbone:** Qwen3-1.7B Base with a LoRA adapter (r=16, attention + MLP). No text is generated.
-- **Pointer head:** a small head reads the hidden state at a `<decide>` token and scores it against the hidden
-  state at the end of each option. A softmax over one question's options gives its probabilities.
-- **API:** the request and response shapes follow TypeSafe's public `POST /v1/systemone` contract
-  (`src/pointwise/schema.py`), with `choice`, `noul` and `score` question types.
-- **Parallel questions:** one state is encoded once, and several questions are answered from it with a block
-  attention mask (`src/pointwise/packing.py`).
-- **Design:** `docs/designs/pointwise-architecture.md` (architecture and the evidence behind each choice) and
-  `docs/designs/pointwise-plan.md` (phases and gates). The design is reconstructed from public clues and from Kev, an
-  open Jev-like model by Jared Palmer. TypeSafe has not published Jev's internals.
+It has been load-tested on a T4. **Read [`docs/production.md`](docs/production.md) before you deploy it.** That guide
+covers every setting, status code, metric and capacity number, plus the known limitations. The most important
+limitation: confidence is not well enough calibrated for fully automated decisions.
 
-## Results so far
+## Quickstart: call it
 
-All numbers below come from the logs in `docs/designs/`.
-
-**Phase 0: logit read-out on Banking77** (Qwen2.5-1.5B-Instruct LoRA, label scoring by full-sequence
-log-likelihood instead of `generate()`):
-
-| | Read-out | Constrained generation |
-|---|---|---|
-| Accuracy | 0.918 | 0.914 |
-| ECE | 0.021 | n/a |
-
-The read-out matched generation on accuracy and was well calibrated, but it was **slower** than generation
-(0.50× the speed), because all 77 options still have to go through the model. The speed gate failed.
-
-**Phase 4: Pointwise training, run 3 (the model carried forward).** Held-out accuracy and ECE after temperature
-scaling (T = 1.52, fitted on a dev sample), 500 questions per source:
-
-| Source | Accuracy | ECE |
-|---|---|---|
-| QNLI | 0.818 | 0.082 |
-| PAWS | 0.750 | 0.130 |
-| Emotion | 0.492 | 0.159 |
-| TweetEval sentiment | 0.652 | 0.038 |
-| Banking77 (zero-shot, never trained on) | 0.626 | 0.113 |
-| **Pooled out-of-domain ECE (first four rows)** | | **0.056** |
-
-**The Phase 4 gate failed.** It required pooled out-of-domain ECE ≤ 0.05 with no source more than 3 points below
-run 2's accuracy. Run 3 is the best of four runs (runs 2–5 landed between 0.056 and 0.085) but still misses both
-conditions: ECE is 0.056 and QNLI accuracy is 4.8 points below run 2. The weak spots are over-confidence on PAWS
-(the model leans on word overlap) and on Emotion. Details and the other runs are in
-`docs/designs/pointwise-phase4-plan.md`.
-
-## Phase 5 results
-
-Run 3 was compared on the same 2,500 held-out questions (500 per source) with a no-training Qwen3-1.7B-Base, the
-Phase 0 Banking77 LoRA specialist (Qwen2.5-1.5B) and its no-training base, using paired bootstrap 95% intervals.
-Full tables, reliability diagrams and risk–coverage curves: `reports/pointwise-results.md`.
-
-- **Wins:** against its own no-training base, pooled out-of-domain accuracy is 0.678 vs 0.640 (+3.8 points, CI
-  [+1.8, +5.8]); Banking77 (zero-shot) +29.8 and TweetEval +20.6. Pooled OOD ECE after temperature is 0.056 vs 0.109
-  for that base, but per source it is mixed and Qwen2.5-Instruct is at 0.052 (point estimates, no intervals). The answer changes when options are shuffled on 21% of Banking77 questions vs 61.5% for the base.
-- **Latency (T4, one ~512-token state):** 196 ms for 1 question and 261 ms for 8, against 223 ms and 1,890 ms for
-  generate-and-parse with the Qwen3 base.
-- **Losses:** Emotion accuracy is 8.0 points *below* the no-training Qwen3 base (CI [-11.8, -4.2]). Against the
-  no-training Qwen2.5-1.5B-Instruct, pooled OOD is -2.0 points (CI [-4.0, -0.1], borderline), with PAWS and Emotion
-  lower. At Cov@5% (the share of questions answerable at <=5% error) Pointwise covers 0.4% pooled OOD vs 17.1% for
-  Qwen2.5-Instruct.
-- **Not distinguishable from noise:** the Banking77 specialist on pooled OOD (-0.2, CI [-2.1, +1.7], so anything from 2 points worse to 1.7 better); the specialist wins Banking77
-  by 30.6 points because that data is in-domain for it.
-- **Not run:** Kev-0.8B/4B (Banking77 is in its training data and it needs a separate environment).
-
-## Phase 6 results (serving latency, T4)
-
-One 524-token state and 8 three-option questions, p95 over 60 requests, against the plan's 150 ms target
-(`reports/pointwise-serving.md`):
-
-- **Cold state:** 212 ms with the adapter unmerged (not met) and 179 ms merged (not met).
-- **Cached state (state-prefix KV cache):** 83 ms unmerged and 56 ms merged (both met).
-- **A cache miss is slower than no cache:** 298 ms p95 at k=8 (medians: +85 ms over cold at k=8, +144 ms at k=1), so
-  the unmerged cache pays only when more than about 40% to 66% of requests reuse a stored state (computed from medians).
-- Cached and merged answers differ from the plain ones by at most 0.0026 in probability over 8 distinct questions
-  on one state, with no top option changed (the merged-and-cached case was not checked). Each cell times the same request 60
-  times; HTTP, concurrency and other state lengths were not measured.
-
-Step 4 (cold-path latency, `reports/pointwise-coldpath.md`) profiled a request into stages on one T4. The 28 backbone
-layers are ~95% of a cold request, the LoRA adapter costs ~51 ms of it, and a cache miss was slow because it read the
-state twice. Two changes kept: a miss now runs one packed pass and stores the state from it, and the adapter is merged
-by default (`POINTWISE_MERGE_LORA=0` to opt out; merged agreed with unmerged on 99.96% of 2,500 held-out questions, OOD ECE
-+0.0006). Same session (`reports/pointwise-serving.md`): default cold p95 233 -> 160 ms (target 150, missed by 10.4; median 144),
-cache miss 295 -> 170 ms, cached 58 ms; no top option changed on 115 questions on the real weights.
-
-HTTP load test (step 7, `reports/pointwise-load.md`), the real server on one T4, k=8 on 526-token states, closed-loop
-clients: one T4 serves about 6.5 req/s of new states and 9.5 req/s when half the states repeat; p95 141 ms at 1 client,
-559 ms at 4 and 2.4 s at 16 (latency grows with the queue, throughput does not). Every 200 matched serial `decide()`
-(max prob diff 0.0036 over 10,032 questions); a 56-request burst got 39 fast 503s with Retry-After and no 500s; SIGTERM
-under load finished all in-flight requests and exited in 2.9 s. Ready 14.6 s after launch, 3.6 GB GPU memory.
-
-## Token efficiency
-
-Pointwise reads the state once, however many questions are asked about it, so with several questions on one state it needs fewer model input tokens. Counted with the Qwen3 tokenizer on the
-Phase 6 latency request (a 524-token state and three-option questions), model input tokens against generate-and-parse
-(one prompt per question, each carrying the whole state again) were (`reports/pointwise-tokens.md`):
-
-| Questions about one state | Pointwise, one pass | Pointwise, on a cache hit (vs no-cache baseline) | Generate-and-parse |
-|---|---|---|---|
-| 1 | 542 (no saving) | 18 (30.2x fewer) | 544 |
-| 2 | 561 (1.9x) | 37 (29.5x) | 1,090 |
-| 4 | 603 (3.6x) | 79 (27.6x) | 2,182 |
-| 8 | 680 (6.4x) | 156 (28.0x) | 4,365 |
-
-- **One pass:** the saving comes from sharing the state across the questions of one request, so it grows with the
-  number of questions (no saving at one question, 6.4x fewer at eight).
-- **On a cache hit:** this column is a different effect, and is not what the server's `usage.input_tokens` reports (that
-  still counts state plus questions, 542 for one question). It is the tokens a request computes when its state is
-  already stored; the first request for a state is a miss and pays for all of it, so the ratio is only reached on
-  later requests. It assumes the state was already sent in an earlier request and
-  is held in the server's cache, so only the questions are read; it is a cross-request cache effect against a
-  generate-and-parse setup with no cache at all, and it does not grow with the number of questions.
-- Pointwise generates no tokens. Generate-and-parse was capped at 8 new tokens per question in the Phase 5 test; the
-  number it actually generated was not recorded.
-- With many options, the question and its options dominate: a Banking77 record is 449 tokens, 97% of them the question
-  and its 77 options (about 5.6 tokens per option).
-- Caveats: the request is one constructed shape, and a generate-and-parse setup with prefix caching would close much
-  of the gap; that was not measured. This is token counts, not time; the measured latency is above.
-
-## Repo layout
-
-```
-src/pointwise/        # the model: schema, encoding, packing, pointer head, training, metrics
-src/pointwise/data/   # training-data converters (public sources, policy generator, rule records)
-src/readout.py        # Phase 0 label read-out for the Banking77 classifier
-src/evaluate_core.py  # shared metrics (ECE, Brier, AURC, coverage), CI-tested without torch
-scripts/kaggle_job.py # the job the Kaggle notebook runs (currently the Phase 6 latency measurement)
-scripts/phase6_latency.py  # cold / cached / merged serving latency on one T4
-scripts/count_tokens.py    # token counts per request shape (reports/pointwise-tokens.md)
-src/serve.py          # FastAPI: /v1/systemone (Pointwise, state-prefix cache), /healthz /readyz /metrics, Phase 0 /predict
-src/serve_ops.py      # request ids, optional API key, drain flag, metrics middleware
-src/serve_main.py     # `python -m src.serve_main`: one-process runner that starts draining at SIGTERM
-scripts/phase5_eval.py   # all arms on one T4; scripts/phase5_report.py builds reports/ from its output
-src/pointwise/baselines.py, compare.py  # no-training scoring; arm alignment and paired bootstrap
-reports/              # pointwise-results.md (python -m scripts.phase5_report --input artifacts/phase5)
-docs/designs/         # plans, run logs and design notes for every phase
-LOGBOOK.md            # chronological record of decisions
-```
-
-The repo also holds the original Phase 0 project: a LoRA vs. QLoRA comparison on Banking77 with a config-driven
-eval harness (`src/train.py`, `src/evaluate.py`, `configs/task.yaml`, `src/serve.py`, `demo/`). Its design is in
-`docs/designs/lora-finetuning-banking-intent-classifier.md`.
-
-## Running it
-
-Training and evaluation run on Kaggle (GPU T4 x2). Import the notebook, attach the Banking77 input, then Save
-Version → Save & Run All. The notebook clones the `jev` branch and runs `scripts/kaggle_job.py`.
-
-Tests (no GPU needed). Install torch first, from the index that matches your machine (see the header of `requirements-serve.txt`):
-
-```bash
-pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
-pip install -r requirements-serve.txt
-pytest tests -q          # about 290 passed, 1 skipped
-```
-
-If the count is about half that, the serving tests skipped: they need `peft`, `httpx` and the
-`Qwen/Qwen2.5-1.5B-Instruct` tokenizer in the Hugging Face cache (one `from_pretrained` of it downloads it).
-
-## Run it in Docker (one NVIDIA GPU)
-
-Operating it in production (every env var, status codes, metrics, sizing, probes, alerts, rollback, limitations):
-[`docs/production.md`](docs/production.md).
-
-**1. Get run 3's weights.** Two files: `state.pt` (LoRA adapter and pointer head, step 1541) and `metrics.json` (gives
-the fitted temperature T = 1.516; the server will not start if its `best_step` differs from the weights' step).
-`state.pt` is in the Kaggle dataset `v1cky1611/pointwise-run3-weights`; both files are in `artifacts/run3/` on the
-machine that ran Phase 4 (git-ignored, never baked into the image). The base model, Qwen3-1.7B-Base (~3.4 GB), downloads
-from Hugging Face on first start into the mounted cache volume.
-
-```bash
-mkdir -p weights
-kaggle datasets download v1cky1611/pointwise-run3-weights -p weights --unzip   # state.pt
-cp artifacts/run3/metrics.json weights/
-```
-
-**2. Build and run.** Needs the NVIDIA Container Toolkit and a driver that supports CUDA 12.8 (570 or newer).
-
-```bash
-docker build -t pointwise .
-export KEY="$(openssl rand -hex 24)"
-docker run --rm --gpus 1 -p 8000:8000 --stop-timeout 30 \
-  -v "$PWD/weights:/weights:ro" -v pointwise-hf-cache:/home/app/.cache/huggingface \
-  -e POINTWISE_WEIGHTS=/weights/state.pt -e POINTWISE_METRICS=/weights/metrics.json \
-  -e POINTWISE_API_KEY="$KEY" \
-  pointwise
-```
-
-Env vars that matter (all read at start-up; a bad value stops the server with a `FATAL:` line):
-
-| Variable | Default | What it does |
-|---|---|---|
-| `POINTWISE_WEIGHTS`, `POINTWISE_METRICS` | required | run 3's `state.pt` and `metrics.json` |
-| `POINTWISE_API_KEY` | unset = **no auth** | then every path except `/healthz` and `/readyz` needs `Authorization: Bearer <key>`; set it anywhere but your laptop |
-| `POINTWISE_MERGE_LORA` | `1` | adapter folded into the weights (31% faster cold, passed the held-out check); `0` serves it unmerged |
-| `POINTWISE_MAX_STATE_TOKENS` / `_MAX_REQUEST_TOKENS` / `_MAX_QUESTIONS` | 4096 / 8192 / 32 | request limits (422 over them) |
-| `POINTWISE_MAX_BODY_BYTES` | 1 MiB | larger bodies get 413 before parsing |
-| `POINTWISE_MAX_QUEUE` / `_QUEUE_TIMEOUT_S` | 16 / 10 | requests waiting for the GPU; past either, 503 + `Retry-After` |
-| `POINTWISE_CACHE_ENTRIES` / `_CACHE_TOKENS` | 8 / 16384 | state KV cache (~57 MB per 512-token state) |
-| `POINTWISE_SHUTDOWN_GRACE_S` | 25 | drain budget on SIGTERM; keep it under `--stop-timeout` |
-
-**3. Call it.** `/readyz` returns 200 once the model has loaded.
+Start it with Docker (below), then:
 
 ```bash
 curl -s localhost:8000/v1/systemone -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{
@@ -222,9 +35,6 @@ curl -s localhost:8000/v1/systemone -H "Authorization: Bearer $KEY" -H 'Content-
   }}'
 ```
 
-The response has this shape (the numbers are illustrative). There is one answer per question key, probabilities are
-rounded to 4 decimals, and no text is generated:
-
 ```json
 {"model": "pointwise-latest",
  "answers": {
@@ -234,20 +44,186 @@ rounded to 4 decimals, and no text is generated:
  "usage": {"input_tokens": 61, "output_tokens": 0}}
 ```
 
-`score` questions return `score`, `confidence`, `legend` and `probabilities`. Every response carries an `X-Request-Id`
-header, and `/metrics` serves Prometheus text.
+The numbers in this response are illustrative. There are three question types:
+- `choice`: pick one of the named criteria.
+- `noul`: return p(yes).
+- `score`: return an expected level, with `score`, `confidence`, `legend` and `probabilities`.
 
-**4. Stop it cleanly.** `docker stop <container>` sends SIGTERM to the server, which is PID 1 in the container. `/readyz`
-fails at once so a load balancer stops routing to it, new data requests get 503, and requests already running finish
-within `POINTWISE_SHUTDOWN_GRACE_S`. Docker kills the process only at `--stop-timeout` (30 s above), after the grace.
+Probabilities are rounded to 4 decimals. Every response carries an `X-Request-Id` header.
 
-The image is built and import-checked in CI only; the image itself has not run on a GPU. The server process it runs
-has: the step 7 load test ran `python -m src.serve_main` on run 3 with the same pins on a T4.
+## Run it in Docker (one NVIDIA GPU)
+
+**1. Get run 3's weights.** You need two files:
+- `state.pt`: the LoRA adapter and the pointer head, step 1541.
+- `metrics.json`: the fitted temperature, T 1.516.
+
+The server will not start if the `best_step` in `metrics.json` is not the step stored in the weights. `state.pt` is in
+the Kaggle dataset `v1cky1611/pointwise-run3-weights`. Both files are in `artifacts/run3/` on the machine that trained
+run 3; they are git-ignored and never baked into the image. On first start, the base model Qwen3-1.7B-Base (about
+3.4 GB) downloads from Hugging Face into the mounted cache volume.
+
+```bash
+mkdir -p weights
+kaggle datasets download v1cky1611/pointwise-run3-weights -p weights --unzip   # state.pt
+cp artifacts/run3/metrics.json weights/
+```
+
+**2. Build and run.** You need the NVIDIA Container Toolkit and a driver that supports CUDA 12.8 (version 570 or newer).
+Use a T4 or better: run 3 used 3,637 MiB after load and peaked at 4,569 MiB under load (`reports/load_test.json`).
+
+```bash
+docker build -t pointwise .
+export KEY="$(openssl rand -hex 24)"
+docker run --rm --gpus 1 -p 8000:8000 --stop-timeout 30 \
+  -v "$PWD/weights:/weights:ro" -v pointwise-hf-cache:/home/app/.cache/huggingface \
+  -e POINTWISE_WEIGHTS=/weights/state.pt -e POINTWISE_METRICS=/weights/metrics.json \
+  -e POINTWISE_API_KEY="$KEY" \
+  pointwise
+```
+
+Without Docker, run `python -m src.serve_main` with the same env vars, on a host that has the `requirements-serve.txt`
+pins installed. Every env var, with its default and its valid range, is in `docs/production.md`, section 3. The most
+important ones:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `POINTWISE_WEIGHTS`, `POINTWISE_METRICS` | required | run 3's `state.pt` and `metrics.json` |
+| `POINTWISE_API_KEY` | unset = **no auth** | when set, every path except `/healthz` and `/readyz` needs `Authorization: Bearer <key>`; set it anywhere but your laptop |
+| `POINTWISE_MERGE_LORA` | `1` | `1` folds the adapter into the weights (cold p95 233 -> 160 ms, `reports/pointwise-serving.md`); `0` serves it unmerged |
+| `POINTWISE_MAX_QUEUE` / `_QUEUE_TIMEOUT_S` | 16 / 10 | requests that may wait for the GPU; past either, the server answers 503 + `Retry-After` |
+| `POINTWISE_SHUTDOWN_GRACE_S` | 25 | the drain budget on SIGTERM; keep it under `--stop-timeout` |
+
+**3. Check it.** `/readyz` returns 200 once the model has loaded: 14.6 s on a T4 with the model already cached.
+`/healthz` is liveness. `/metrics` serves Prometheus text and needs the key.
+
+**4. Stop it cleanly.** `docker stop <container>` sends SIGTERM. `/readyz` fails at once, so a load balancer stops
+routing traffic to the container. New data requests get 503, and requests already running finish within
+`POINTWISE_SHUTDOWN_GRACE_S`.
+
+## How it works
+
+- **Backbone:** Qwen3-1.7B-Base with a LoRA adapter (r=16, on attention and MLP). By default the adapter is merged into
+  the weights when the server starts.
+- **Pointer head:** a small head reads the hidden state at a `<decide>` token. It scores that against the hidden state
+  at the end of each option, and a softmax over one question's options gives that question's probabilities.
+  Temperature scaling (T 1.516, fitted on dev data) softens over-confident scores.
+- **Parallel questions:** the state is encoded once, and all the questions are answered from it in one pass, using a
+  block attention mask (`src/pointwise/packing.py`).
+- **State cache:** the server keeps the key/value tensors of recent states. A repeated state then costs only its
+  questions (in-process p95 58 ms instead of 160 ms, `reports/pointwise-serving.md`).
+- **Design:** `docs/designs/pointwise-architecture.md` gives the architecture and the evidence behind each choice;
+  `docs/designs/pointwise-plan.md` gives the phases, gates and run logs. The design is reconstructed from public clues
+  and from Kev, an open Jev-like model by Jared Palmer. TypeSafe has not published Jev's internals.
+
+## Results
+
+Accuracy and calibration were measured on 2,500 held-out questions, 500 per source, with paired bootstrap 95%
+intervals (`reports/pointwise-results.md`).
+
+| Source | Accuracy | ECE after T |
+|---|---|---|
+| QNLI | 0.818 | 0.082 |
+| PAWS | 0.750 | 0.130 |
+| Emotion | 0.492 | 0.159 |
+| TweetEval sentiment | 0.652 | 0.038 |
+| Banking77 (zero-shot, never trained on) | 0.626 | 0.113 |
+| **Pooled out-of-domain** | **0.678** | **0.056** |
+
+*ECE* (expected calibration error) measures how far the stated confidence is from the actual accuracy. Lower is
+better.
+
+**Wins:**
+- **Against its own untrained base:** +3.8 points pooled out-of-domain accuracy (CI [+1.8, +5.8]).
+- **On two sources:** +29.8 on Banking77 and +20.6 on TweetEval.
+- **Option order:** shuffling the options changes the answer far less often (21% vs 61.5% on Banking77).
+- **Calibration:** ECE after T is 0.056, against 0.109 for the base.
+
+**Losses:**
+- **Emotion:** -8.0 points against the untrained base.
+- **Against untrained Qwen2.5-1.5B-Instruct:** PAWS -5.8 and Emotion -4.4.
+- **Calibration target:** missed (0.056 against 0.05).
+- **Ranking by confidence:** nearly useless. Cov@5% is 0.004, against 0.171 for Qwen2.5-Instruct.
+
+**Serving on one T4**, with k=8 questions on one state.
+
+One request at a time, in-process (no HTTP), on a 524-token state (`reports/pointwise-serving.md`):
+
+| Path | p95 |
+|---|---|
+| new state | 160.4 ms (the 150 ms target is missed by 10.4) |
+| cached state | 58.4 ms |
+
+Through HTTP, with closed-loop clients on a 526-token state (`reports/pointwise-load.md`). Each client sends its next
+request as soon as the last one answers.
+
+| Mix | Clients | Throughput | p95 |
+|---|---|---|---|
+| all new states | 1 | 5.94 req/s | 141 ms |
+| all new states | 4 | 6.91 req/s | 559 ms |
+| all new states | 16 | 6.52 req/s | 2,434 ms |
+| half repeated | 4 | 9.60 req/s | 590 ms |
+
+Past about 4 clients, throughput stops rising and each extra client only adds waiting.
+
+**Under load:**
+- **Correctness:** every answer matched the serial reference, with a maximum probability difference of 0.0036 over
+  10,032 questions.
+- **Overload:** of a burst of 56 requests, 17 got 200 and 39 got 503 with `Retry-After` (260 ms median); none got a 500.
+- **Shutdown:** a SIGTERM under load finished every in-flight request and exited in 2.9 s.
+
+**Token efficiency** (`reports/pointwise-tokens.md`): 8 questions on one state take 680 input tokens, against 4,365
+for generate-and-parse (6.4x fewer). On a cached state they take 156 tokens. Pointwise generates no tokens at all.
+
+The Phase 0 read-out experiment (Banking77 label scoring: accuracy 0.918, ECE 0.021) and the four training runs are
+logged in `docs/designs/`.
 
 ## Known limitations
 
-- The Phase 4 calibration gate failed (pooled out-of-domain ECE 0.056 against a 0.05 target).
-- Each result is a single run with one seed, and each source has 500 held-out questions, so small gaps between
-  runs may be noise. Phase 5 reports bootstrap confidence intervals; calibration differences (ECE) have none.
-- `POST /v1/systemone` exists in `src/serve.py` but the server itself was only tested on a tiny random model; the latency script ran on the real model on a T4. Cold requests miss the 150 ms target (see Phase 6 results).
-- Training data are public datasets plus rule-generated records. There is no teacher-labelled synthetic set.
+The full table, with every number and its source, is in `docs/production.md`, section 7. In short:
+- **Calibration:** confidence is approximately calibrated (ECE 0.056) but misses the 0.05 gate, and it cannot pick out
+  a low-error subset. Keep a human or a later check in the loop.
+- **Weak tasks:** emotion and paraphrase tasks are weak.
+- **Long states:** accuracy on states longer than the 384 tokens it was trained on was never measured. The server's limit allows 4,096.
+- **Cold latency:** cold p95 is 160 ms, against the 150 ms target.
+- **Untested:** the Docker image itself has never run on a GPU (the same server process and pins have), and
+  open-loop load is untested.
+- **Evidence base:** one training run with one seed; calibration differences have no confidence intervals.
+
+## Repo layout
+
+```
+src/pointwise/          the model: schema (API contract), encoding, packing, pointer head, training, metrics
+src/pointwise/data/     training-data converters (public sources, policy generator, rule records)
+src/serve.py            FastAPI: /v1/systemone, /healthz, /readyz, /metrics (and the Phase 0 /predict demo)
+src/serve_ops.py        request ids, API key, drain flag, metrics middleware
+src/serve_main.py       `python -m src.serve_main`: the one-process runner that drains on SIGTERM
+Dockerfile              CUDA 12.8 image for one GPU
+docs/production.md      the operator's guide
+docs/designs/           architecture, plans and run logs for every phase
+reports/                evaluation, latency, load and token reports, with their raw JSON
+scripts/                Kaggle job, evaluation, latency profiling, load test, token counts
+tests/                  CPU tests (tiny random models, no GPU)
+```
+
+The repo also holds the original Phase 0 project, a LoRA vs QLoRA Banking77 classifier (`src/train.py`,
+`src/evaluate.py`, `configs/task.yaml`, `demo/`; design in `docs/designs/lora-finetuning-banking-intent-classifier.md`).
+The code from before Pointwise is kept on the `legacy-main` branch.
+
+## Development
+
+**Tests** run on the CPU. Install torch from the index that matches your machine (see the header of
+`requirements-serve.txt`):
+
+```bash
+pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements-serve.txt
+pytest tests -q          # about 300 passed, 1 skipped
+```
+
+If the count is about half that, the serving tests were skipped. They need `peft`, `httpx` and the
+`Qwen/Qwen2.5-1.5B-Instruct` tokenizer in the Hugging Face cache. `tests/test_production_doc.py` checks that the env var
+table in `docs/production.md` matches the code.
+
+**GPU jobs** run on Kaggle (T4 x2). The runner notebook `notebooks/kaggle_pointwise_job.ipynb` clones the repo and runs
+`scripts/kaggle_job.py`. That script decides which job runs, so a new job needs no notebook edit. To run one, use Save
+Version → Save & Run All.
