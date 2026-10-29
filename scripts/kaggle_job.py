@@ -5,26 +5,27 @@ branch, installs dependencies, finds the Banking77 adapter and calls this
 module, so the job is chosen in git and a new job needs no notebook edits:
 change the job below, push, then Save & Run All on Kaggle.
 
-Current job: step 4 same-session A/B of the cold-path changes (docs/designs/pointwise-plan.md). No training.
-1. Find Phase 4 run 3's best weights first, before any slow step: any state.pt under /kaggle/input (the
-   pointwise-run3-weights dataset, or notebook version 12, session 358167213). Only one at run 3's best step is accepted.
-2. Remove Kaggle's preinstalled torchao and check that LoRA can be applied (preflight).
-3. Rebuild the Phase 3 data into DATA_DIR with run 3's settings (train cap 2,000, as Phase 5 did).
-4. Run scripts.coldpath_ab on one GPU: old vs new cache miss, cold and cached, unmerged and merged, interleaved in
-   one session; then every path's probabilities against the old reference on 104 requests.
-The profile + merged-check job is in git history at ef86f40. The Phase 6 latency job is in git history at 0d56b95, Phase 5 evaluation at a9b86a0, Phase 4 training at b4c10e7.
+Current job: step 7 HTTP load test of the real server (docs/designs/pointwise-plan.md). No training, no data build.
+1. Find Phase 4 run 3's best weights first, before any slow step (the pointwise-run3-weights dataset holds only
+   state.pt), and write run 3's metrics.json next to the output (T and best step; load_pointwise checks the step).
+2. Remove Kaggle's preinstalled torchao, install requirements-serve.txt (the serving pins), check LoRA applies.
+3. Run scripts.load_test on one GPU: the real `python -m src.serve_main`, 1/4/16 clients, burst, SIGTERM, then the
+   in-process reference check.
+The cold-path A/B job is in git history at 4cd8c65, the profile + merged-check job at ef86f40, the Phase 6 latency job at 0d56b95, Phase 5 evaluation at a9b86a0, Phase 4 training at b4c10e7.
 
 Usage: python -m scripts.kaggle_job --adapter-dir <dir> --output-dir <dir>
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
-DATA_DIR = "/tmp/pointwise-data-run8"
+# From run 3 artifacts/run3/metrics.json: the fitted temperature and the step it was fitted for
+RUN3_METRICS = {"temperature": 1.515908521291114, "best_step": 1541}
 
 PREFLIGHT = """
 import torch, transformers
@@ -75,13 +76,17 @@ def main() -> None:
     print("Using run 3 weights:", state, flush=True)
     # Kaggle's image ships torchao 0.10; peft 0.21 raises on any torchao below 0.16 while applying LoRA.
     run([sys.executable, "-m", "pip", "uninstall", "-y", "-q", "torchao"], env)
+    if run([sys.executable, "-m", "pip", "install", "-q", "-r", "requirements-serve.txt"], env):
+        sys.exit("installing requirements-serve.txt failed")
     if run([sys.executable, "-c", PREFLIGHT], env):
         sys.exit("preflight failed: LoRA can't be applied in this environment")
-    if run([sys.executable, "-m", "src.pointwise.data.build", "--out", DATA_DIR, "--train-cap", "2000"], env):
-        sys.exit("data build failed")
-    if run([sys.executable, "-m", "scripts.coldpath_ab", "--data-dir", DATA_DIR, "--state", str(state),
-            "--output-dir", args.output_dir], env):
-        sys.exit("cold-path A/B failed")
+    out = Path(args.output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    metrics = out / "run3_metrics.json"
+    metrics.write_text(json.dumps(RUN3_METRICS))
+    if run([sys.executable, "-m", "scripts.load_test", "--weights", str(state), "--metrics", str(metrics),
+            "--output-dir", str(out)], env):
+        sys.exit("load test failed")
 
 
 if __name__ == "__main__":
