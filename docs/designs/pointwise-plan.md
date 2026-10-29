@@ -218,6 +218,15 @@ true distribution, and why one-hot training still ends up overconfident.
   cold 233.4 -> 160.4 ms (merged; 150 ms target missed by 10.4), miss 295.3 -> 170.1, cached merged 58.4; max prob
   diff 0.0038, no top-option flips on 115 questions. Remaining ~138 ms is GPU compute in the 28 layers.
 
+- **Step 7 log (2026-10-29, HTTP load test).** Kaggle T4, commit 8f5579b, `reports/pointwise-load.md`. First real
+  start of `python -m src.serve_main` on run 3 (merged): ready in 14.6 s, 3.6 GB after load, probes and API key as
+  documented. Closed-loop, 200 requests per level, k=8 on 526 tokens: cold 1/4/16 clients 5.9/6.9/6.5 req/s, p95
+  141/559/2,434 ms; 50% repeated states 8.2/9.6/9.4 req/s, p95 156/590/1,953 ms; no non-200. Every 200 (1,254
+  responses, 10,032 questions) vs serial decide(): max prob diff 0.0036, 4 flips on near ties (margins <= 0.0005).
+  Burst of 56: 17 x 200, 39 x 503 with Retry-After, no 500s. SIGTERM: /readyz 503 in 30 ms, 32 in-flight all 200,
+  exit in 2.9 s (grace 25). HTTP overhead not resolved (in-process ran last, 20 ms slower than served: thermal drift).
+  First run failed before start: datasets 5 refuses banking77.py; the load test reads the Parquet copy.
+
 ## Phase 7 — Stretch
 - RLCD stage 2 with rationales (OpenJev Algorithm 1) on a reasoning task.
 - >255 options via 2-stage Noul scoring → Choice.

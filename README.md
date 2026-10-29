@@ -94,6 +94,12 @@ by default (`POINTWISE_MERGE_LORA=0` to opt out; merged agreed with unmerged on 
 +0.0006). Same session (`reports/pointwise-serving.md`): default cold p95 233 -> 160 ms (target 150, missed by 10.4; median 144),
 cache miss 295 -> 170 ms, cached 58 ms; no top option changed on 115 questions on the real weights.
 
+HTTP load test (step 7, `reports/pointwise-load.md`), the real server on one T4, k=8 on 526-token states, closed-loop
+clients: one T4 serves about 6.5 req/s of new states and 9.5 req/s when half the states repeat; p95 141 ms at 1 client,
+559 ms at 4 and 2.4 s at 16 (latency grows with the queue, throughput does not). Every 200 matched serial `decide()`
+(max prob diff 0.0036 over 10,032 questions); a 56-request burst got 39 fast 503s with Retry-After and no 500s; SIGTERM
+under load finished all in-flight requests and exited in 2.9 s. Ready 14.6 s after launch, 3.6 GB GPU memory.
+
 ## Token efficiency
 
 Pointwise reads the state once, however many questions are asked about it, so with several questions on one state it needs fewer model input tokens. Counted with the Qwen3 tokenizer on the
@@ -232,8 +238,8 @@ header, and `/metrics` serves Prometheus text.
 fails at once so a load balancer stops routing to it, new data requests get 503, and requests already running finish
 within `POINTWISE_SHUTDOWN_GRACE_S`. Docker kills the process only at `--stop-timeout` (30 s above), after the grace.
 
-The image is built and import-checked in CI only. It has not yet run end to end on a GPU; that is production plan
-step 7, the HTTP load test.
+The image is built and import-checked in CI only; the image itself has not run on a GPU. The server process it runs
+has: the step 7 load test ran `python -m src.serve_main` on run 3 with the same pins on a T4.
 
 ## Known limitations
 
