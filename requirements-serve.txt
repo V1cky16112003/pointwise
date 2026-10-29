@@ -1,11 +1,12 @@
 # Pointwise serving + the full test suite (branch jev): the Docker image, CI and local tests install this file.
 # requirements.txt stays the Kaggle/training list: the Kaggle notebook pip-installs every line of it, so pins here
 # never change a Kaggle job's environment. Exact versions the suite passes with
-# (290 passed, 1 skipped, 2026-10-29; Python 3.12 in the image and CI, 3.14 locally).
+# (290 passed, 1 skipped, 2026-10-29, locally on Python 3.14 with torch 2.12.1; CI re-runs it on 3.12 with the
+# torch pin below). torch is 2.11.0 because 2.12.1 has no CUDA 12.8 wheel.
 #
 # torch is NOT pinned here: its wheel depends on the CUDA build, so install it first, from the matching index:
-#   GPU image / CUDA 12.8:  pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cu128
-#   CPU (CI, local tests):  pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cpu
+#   GPU image / CUDA 12.8:  pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
+#   CPU (CI, local tests):  pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
 # The T4 latency numbers in reports/ were measured with torch 2.11.0+cu128 on Kaggle.
 # Not pinned here, install by hand if you need them: gradio (demo/app.py, Phase 0 demo), bitsandbytes (QLoRA arm, Linux GPU).
 

@@ -12,7 +12,7 @@ RUN python3 -m venv /opt/venv
 ENV PATH=/opt/venv/bin:$PATH PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 
 # Dependencies before code: these layers are cached and only rebuilt when the pins change.
-RUN pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cu128
+RUN pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
 COPY requirements-serve.txt /app/requirements-serve.txt
 RUN pip install -r /app/requirements-serve.txt
 

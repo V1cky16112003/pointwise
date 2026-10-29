@@ -33,7 +33,7 @@ jobs:
           python-version: "3.12"
       - name: Install pinned dependencies (CPU torch)
         run: |
-          pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cpu
+          pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements-serve.txt
       - name: Cache the tokenizer the tests use
         run: python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained('Qwen/Qwen2.5-1.5B-Instruct')"

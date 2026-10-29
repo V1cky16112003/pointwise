@@ -154,7 +154,7 @@ Version → Save & Run All. The notebook clones the `jev` branch and runs `scrip
 Tests (no GPU needed). Install torch first, from the index that matches your machine (see the header of `requirements-serve.txt`):
 
 ```bash
-pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cpu
+pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements-serve.txt
 pytest tests -q          # about 290 passed, 1 skipped
 ```
