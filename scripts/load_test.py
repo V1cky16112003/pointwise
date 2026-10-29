@@ -348,11 +348,11 @@ def main() -> None:
     args = parser.parse_args()
 
     import torch
+    from datasets import load_dataset
     from huggingface_hub import snapshot_download
     from transformers import AutoTokenizer
 
     from src.config import load_task_config
-    from src.data import load_banking77_splits
     from src.pointwise.train import MODEL_NAME
 
     if not torch.cuda.is_available():
@@ -361,7 +361,8 @@ def main() -> None:
     snapshot_download(MODEL_NAME)  # timed apart, so startup_s is the server's own start, not the download
     download_s = time.perf_counter() - start
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    messages = [row["text"] for row in load_banking77_splits(load_task_config()).val]
+    # The Hub's Parquet copy: datasets 5 (requirements-serve.txt) no longer runs banking77.py, the loader src.data uses
+    messages = load_dataset(load_task_config().dataset_hf_name, revision="refs/convert/parquet", split="test")["text"]
     count = lambda text: len(tokenizer.encode(text, add_special_tokens=False))  # noqa: E731
     bodies: dict[int, dict] = {}
 
