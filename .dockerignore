@@ -1,0 +1,15 @@
+.git
+artifacts
+checkpoints
+eval_runs
+data
+reports
+notebooks
+diagrams
+**/__pycache__
+**/*.pt
+**/*.safetensors
+**/*.bin
+.pytest_cache
+.venv
+venv

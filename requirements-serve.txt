@@ -1,0 +1,31 @@
+# Pointwise serving + the full test suite (branch jev): the Docker image, CI and local tests install this file.
+# requirements.txt stays the Kaggle/training list: the Kaggle notebook pip-installs every line of it, so pins here
+# never change a Kaggle job's environment. Exact versions the suite passes with
+# (290 passed, 1 skipped, 2026-10-29; Python 3.12 in the image and CI, 3.14 locally).
+#
+# torch is NOT pinned here: its wheel depends on the CUDA build, so install it first, from the matching index:
+#   GPU image / CUDA 12.8:  pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cu128
+#   CPU (CI, local tests):  pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cpu
+# The T4 latency numbers in reports/ were measured with torch 2.11.0+cu128 on Kaggle.
+# Not pinned here, install by hand if you need them: gradio (demo/app.py, Phase 0 demo), bitsandbytes (QLoRA arm, Linux GPU).
+
+transformers==5.14.1
+tokenizers==0.22.2
+huggingface_hub==1.26.0
+safetensors==0.8.0
+accelerate==1.15.0
+peft==0.21.2
+datasets==5.0.0
+numpy==2.3.4
+pyyaml==6.0.3
+scikit-learn==1.8.0
+matplotlib==3.10.8
+requests==2.32.5
+
+fastapi==0.138.1
+starlette==1.3.1
+uvicorn==0.49.0  # src/serve_main.py overrides Server.handle_exit; checked against 0.49 source and tests only
+pydantic==2.13.4
+httpx==0.28.1  # fastapi's TestClient, tests only
+
+pytest==9.1.1

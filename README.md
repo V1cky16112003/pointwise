@@ -151,12 +151,89 @@ eval harness (`src/train.py`, `src/evaluate.py`, `configs/task.yaml`, `src/serve
 Training and evaluation run on Kaggle (GPU T4 x2). Import the notebook, attach the Banking77 input, then Save
 Version → Save & Run All. The notebook clones the `jev` branch and runs `scripts/kaggle_job.py`.
 
-Tests (no GPU needed):
+Tests (no GPU needed). Install torch first, from the index that matches your machine (see the header of `requirements-serve.txt`):
 
 ```bash
-pip install -r requirements-core.txt
-pytest tests/ -v
+pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements-serve.txt
+pytest tests -q          # about 290 passed, 1 skipped
 ```
+
+If the count is about half that, the serving tests skipped: they need `peft`, `httpx` and the
+`Qwen/Qwen2.5-1.5B-Instruct` tokenizer in the Hugging Face cache (one `from_pretrained` of it downloads it).
+
+## Run it in Docker (one NVIDIA GPU)
+
+**1. Get run 3's weights.** Two files: `state.pt` (LoRA adapter and pointer head, step 1541) and `metrics.json` (gives
+the fitted temperature T = 1.516; the server will not start if its `best_step` differs from the weights' step).
+`state.pt` is in the Kaggle dataset `v1cky1611/pointwise-run3-weights`; both files are in `artifacts/run3/` on the
+machine that ran Phase 4 (git-ignored, never baked into the image). The base model, Qwen3-1.7B-Base (~3.4 GB), downloads
+from Hugging Face on first start into the mounted cache volume.
+
+```bash
+mkdir -p weights
+kaggle datasets download v1cky1611/pointwise-run3-weights -p weights --unzip   # state.pt
+cp artifacts/run3/metrics.json weights/
+```
+
+**2. Build and run.** Needs the NVIDIA Container Toolkit and a driver that supports CUDA 12.8 (570 or newer).
+
+```bash
+docker build -t pointwise .
+export KEY="$(openssl rand -hex 24)"
+docker run --rm --gpus 1 -p 8000:8000 --stop-timeout 30 \
+  -v "$PWD/weights:/weights:ro" -v pointwise-hf-cache:/home/app/.cache/huggingface \
+  -e POINTWISE_WEIGHTS=/weights/state.pt -e POINTWISE_METRICS=/weights/metrics.json \
+  -e POINTWISE_API_KEY="$KEY" \
+  pointwise
+```
+
+Env vars that matter (all read at start-up; a bad value stops the server with a `FATAL:` line):
+
+| Variable | Default | What it does |
+|---|---|---|
+| `POINTWISE_WEIGHTS`, `POINTWISE_METRICS` | required | run 3's `state.pt` and `metrics.json` |
+| `POINTWISE_API_KEY` | unset = **no auth** | then every path except `/healthz` and `/readyz` needs `Authorization: Bearer <key>`; set it anywhere but your laptop |
+| `POINTWISE_MERGE_LORA` | `1` | adapter folded into the weights (31% faster cold, passed the held-out check); `0` serves it unmerged |
+| `POINTWISE_MAX_STATE_TOKENS` / `_MAX_REQUEST_TOKENS` / `_MAX_QUESTIONS` | 4096 / 8192 / 32 | request limits (422 over them) |
+| `POINTWISE_MAX_BODY_BYTES` | 1 MiB | larger bodies get 413 before parsing |
+| `POINTWISE_MAX_QUEUE` / `_QUEUE_TIMEOUT_S` | 16 / 10 | requests waiting for the GPU; past either, 503 + `Retry-After` |
+| `POINTWISE_CACHE_ENTRIES` / `_CACHE_TOKENS` | 8 / 16384 | state KV cache (~57 MB per 512-token state) |
+| `POINTWISE_SHUTDOWN_GRACE_S` | 25 | drain budget on SIGTERM; keep it under `--stop-timeout` |
+
+**3. Call it.** `/readyz` returns 200 once the model has loaded.
+
+```bash
+curl -s localhost:8000/v1/systemone -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{
+  "state": "Shoes arrived two weeks late and in the wrong size. Also two charges on my card.",
+  "questions": {
+    "department": {"type": "choice", "instructions": "Which team should handle this?",
+                   "criteria": {"returns": "Refunds, wrong items", "shipping": null, "billing": "Charges"}},
+    "escalate":   {"type": "noul", "instructions": "Does this need urgent human attention?"}
+  }}'
+```
+
+The response has this shape (the numbers are illustrative). There is one answer per question key, probabilities are
+rounded to 4 decimals, and no text is generated:
+
+```json
+{"model": "pointwise-latest",
+ "answers": {
+   "department": {"type": "choice", "choice": "returns", "confidence": 0.71,
+                  "probabilities": {"returns": 0.7102, "shipping": 0.1185, "billing": 0.1713}},
+   "escalate":   {"type": "noul", "noul": 0.3364}},
+ "usage": {"input_tokens": 61, "output_tokens": 0}}
+```
+
+`score` questions return `score`, `confidence`, `legend` and `probabilities`. Every response carries an `X-Request-Id`
+header, and `/metrics` serves Prometheus text.
+
+**4. Stop it cleanly.** `docker stop <container>` sends SIGTERM to the server, which is PID 1 in the container. `/readyz`
+fails at once so a load balancer stops routing to it, new data requests get 503, and requests already running finish
+within `POINTWISE_SHUTDOWN_GRACE_S`. Docker kills the process only at `--stop-timeout` (30 s above), after the grace.
+
+The image is built and import-checked in CI only. It has not yet run end to end on a GPU; that is production plan
+step 7, the HTTP load test.
 
 ## Known limitations
 
