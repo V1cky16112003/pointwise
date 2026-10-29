@@ -170,6 +170,9 @@ If the count is about half that, the serving tests skipped: they need `peft`, `h
 
 ## Run it in Docker (one NVIDIA GPU)
 
+Operating it in production (every env var, status codes, metrics, sizing, probes, alerts, rollback, limitations):
+[`docs/production.md`](docs/production.md).
+
 **1. Get run 3's weights.** Two files: `state.pt` (LoRA adapter and pointer head, step 1541) and `metrics.json` (gives
 the fitted temperature T = 1.516; the server will not start if its `best_step` differs from the weights' step).
 `state.pt` is in the Kaggle dataset `v1cky1611/pointwise-run3-weights`; both files are in `artifacts/run3/` on the

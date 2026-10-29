@@ -227,6 +227,11 @@ true distribution, and why one-hot training still ends up overconfident.
   exit in 2.9 s (grace 25). HTTP overhead not resolved (in-process ran last, 20 ms slower than served: thermal drift).
   First run failed before start: datasets 5 refuses banking77.py; the load test reads the Parquet copy.
 
+- **Step 8 log (2026-10-29, operator's guide), done.** `docs/production.md`: what it is and must not be used for, how to
+  run it, every env var (checked against src/ with defaults by `tests/test_production_doc.py`, mutation-checked on a
+  missing row and a changed default), endpoints, status codes, metrics and logging, measured capacity with a sizing
+  rule, probes, alerts, deploy and rollback, and the known limitations with their numbers and sources. No code change.
+
 ## Phase 7 — Stretch
 - RLCD stage 2 with rationales (OpenJev Algorithm 1) on a reasoning task.
 - >255 options via 2-stage Noul scoring → Choice.
