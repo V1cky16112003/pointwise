@@ -199,7 +199,8 @@ def build_model(args, device: torch.device) -> DecisionModel:
     from peft import LoraConfig, get_peft_model
     from transformers import AutoModel, AutoTokenizer
 
-    dtype = torch.float16 if device.type == "cuda" else torch.float32  # T4: no bf16
+    # T4: no bf16. MPS (Apple GPU) serves in fp16 too: fp32 would not fit an 8 GB Mac. Training never runs on MPS.
+    dtype = torch.float16 if device.type in ("cuda", "mps") else torch.float32
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     backbone = AutoModel.from_pretrained(args.model, dtype=dtype, attn_implementation="sdpa").to(device)
     backbone.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})

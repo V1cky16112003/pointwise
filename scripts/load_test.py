@@ -9,10 +9,13 @@
 3. Overload: BURST requests at once, more than the queue (16) holds. Expect fast 503s with Retry-After, no 500s.
 4. Shutdown: SIGTERM while 16 clients are busy. /readyz must fail at once, requests already sent must finish (200)
    or get a 503, and the process must exit inside POINTWISE_SHUTDOWN_GRACE_S.
+With --open-loop, step 2 and 3 are replaced by open-loop traffic: requests arrive on their own Poisson schedule at
+   RATES req/s (OPEN_LOOP_S seconds each, every state new), whether or not earlier ones have answered, so bursts build
+   the queue up and down as real traffic does.
 5. After the server has exited, the same weights in-process on the same GPU: every 200's answers against
    decide() run serially (correctness), and decide()'s own latency on the path the server takes (HTTP overhead).
 
-Usage: python -m scripts.load_test --weights <state.pt> --metrics <metrics.json> --output-dir <dir>
+Usage: python -m scripts.load_test --weights <state.pt> --metrics <metrics.json> --output-dir <dir> [--open-loop]
 """
 from __future__ import annotations
 
@@ -44,6 +47,8 @@ API_KEY = "load-test-key"
 GRACE_S = 25.0
 PORT = 8000
 REFERENCE_REPS = 60
+RATES = (2.0, 4.0, 6.0, 8.0)  # around the measured cold capacity of ~6.5 req/s on one T4
+OPEN_LOOP_S = 60.0
 
 
 def percentile(samples: list[float], q: float) -> float:
@@ -149,6 +154,28 @@ async def closed_loop(client, state_ids: list[int], body_for, clients: int, head
     start = time.perf_counter()
     await asyncio.gather(*(worker() for _ in range(clients)))
     return records, time.perf_counter() - start
+
+
+def arrival_times(rate: float, duration_s: float, seed: int) -> list[float]:
+    """Poisson arrivals: exponential gaps with mean 1/rate, as many as fall inside duration_s."""
+    rng, t, out = random.Random(seed), 0.0, []
+    while (t := t + rng.expovariate(rate)) < duration_s:
+        out.append(t)
+    return out
+
+
+async def open_loop(client, state_ids: list[int], times: list[float], body_for, headers: dict) -> tuple[list[dict], float]:
+    """Send state_ids[i] at times[i] seconds from now, never waiting for answers. -> (records, wall seconds).
+    Bodies are built before the clock starts so building one never delays an arrival."""
+    bodies = [body_for(i) for i in state_ids]
+    start = time.perf_counter()
+
+    async def at(t, i, body):
+        await asyncio.sleep(max(0.0, start + t - time.perf_counter()))
+        return await send(client, i, body, headers)
+
+    records = await asyncio.gather(*(at(t, i, b) for t, i, b in zip(times, state_ids, bodies)))
+    return list(records), time.perf_counter() - start
 
 
 def level_row(records: list[dict], wall_s: float, clients: int) -> dict:
@@ -311,7 +338,18 @@ async def run_server_phase(args, env: dict, body_for) -> dict:
             out["probes"] = await probes(client, body_for(-1))
             warm, _ = await closed_loop(client, [-2 - i for i in range(5)], body_for, 1, headers)  # CUDA warm-up, untimed
             out["levels"], served, nxt = [], [r for r in warm if r["status"] == 200], 0
-            for mix, share in (("cold", 0.0), ("cached", REPEAT_SHARE)):
+            for rate in RATES if args.open_loop else ():
+                times = arrival_times(rate, OPEN_LOOP_S, seed=int(rate * 10))
+                ids = list(range(nxt, nxt + len(times)))
+                nxt += len(times)
+                before = await scrape(client)
+                records, wall = await open_loop(client, ids, times, body_for, headers)
+                row = {"mix": "open-loop cold", "rate_rps": rate, "offered_rps": len(times) / OPEN_LOOP_S,
+                       **level_row(records, wall, 0), "server_counters": metrics_delta(before, await scrape(client))}
+                out["levels"].append(row)
+                served += [r for r in records if r["status"] == 200]
+                print(json.dumps({k: row[k] for k in ("rate_rps", "statuses", "throughput_rps", "latency_ms")}), flush=True)
+            for mix, share in () if args.open_loop else (("cold", 0.0), ("cached", REPEAT_SHARE)):
                 for clients in CLIENTS:
                     ids = request_mix(PER_LEVEL, share, seed=clients, first_new=nxt)
                     nxt = max(ids) + 1
@@ -323,6 +361,11 @@ async def run_server_phase(args, env: dict, body_for) -> dict:
                     out["levels"].append(row)
                     served += [r for r in records if r["status"] == 200]
                     print(json.dumps({k: row[k] for k in ("mix", "clients", "statuses", "throughput_rps", "latency_ms")}), flush=True)
+            if args.open_loop:  # the burst was measured in the closed-loop run
+                out["shutdown"], records = await shutdown_check(client, proc, body_for, nxt, headers)
+                served += [r for r in records if r["status"] == 200]
+                out["served"] = served
+                return out
             before = await scrape(client)
             burst = await asyncio.gather(*(send(client, nxt + i, body_for(nxt + i), headers) for i in range(BURST)))
             nxt += BURST
@@ -345,6 +388,7 @@ def main() -> None:
     parser.add_argument("--weights", required=True)
     parser.add_argument("--metrics", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--open-loop", action="store_true", help="Poisson arrivals at RATES instead of closed-loop clients")
     args = parser.parse_args()
 
     import torch
@@ -381,7 +425,7 @@ def main() -> None:
                      "packages": subprocess.run([sys.executable, "-m", "pip", "freeze"], capture_output=True,
                                                 text=True).stdout.splitlines()}
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    (args.output_dir / "load_test.json").write_text(json.dumps(result, indent=1))
+    (args.output_dir / ("load_test_open.json" if args.open_loop else "load_test.json")).write_text(json.dumps(result, indent=1))
     print(json.dumps({k: v for k, v in result.items() if k != "env"}, indent=1), flush=True)
 
 

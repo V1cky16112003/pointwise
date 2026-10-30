@@ -5,13 +5,14 @@ branch, installs dependencies, finds the Banking77 adapter and calls this
 module, so the job is chosen in git and a new job needs no notebook edits:
 change the job below, push, then Save & Run All on Kaggle.
 
-Current job: step 7 HTTP load test of the real server (docs/designs/pointwise-plan.md). No training, no data build.
+Current job: next-steps step 4, the open-loop HTTP load test (docs/designs/pointwise-next-steps.md), after the step 7
+closed-loop load test of the real server (docs/designs/pointwise-plan.md). No training, no data build.
 1. Find Phase 4 run 3's best weights first, before any slow step (the pointwise-run3-weights dataset holds only
    state.pt), and write run 3's metrics.json next to the output (T and best step; load_pointwise checks the step).
 2. Remove Kaggle's preinstalled torchao, install requirements-serve.txt (the serving pins), check LoRA applies.
-3. Run scripts.load_test on one GPU: the real `python -m src.serve_main`, 1/4/16 clients, burst, SIGTERM, then the
-   in-process reference check.
-The cold-path A/B job is in git history at 4cd8c65, the profile + merged-check job at ef86f40, the Phase 6 latency job at 0d56b95, Phase 5 evaluation at a9b86a0, Phase 4 training at b4c10e7.
+3. Run scripts.load_test --open-loop on one GPU: the real `python -m src.serve_main`, Poisson arrivals at 2/4/6/8 req/s
+   for 60 s each, SIGTERM, then the in-process reference check.
+The closed-loop load test job (step 7) is this job without --open-loop. The cold-path A/B job is in git history at 4cd8c65, the profile + merged-check job at ef86f40, the Phase 6 latency job at 0d56b95, Phase 5 evaluation at a9b86a0, Phase 4 training at b4c10e7.
 
 Usage: python -m scripts.kaggle_job --adapter-dir <dir> --output-dir <dir>
 """
@@ -85,7 +86,7 @@ def main() -> None:
     metrics = out / "run3_metrics.json"
     metrics.write_text(json.dumps(RUN3_METRICS))
     if run([sys.executable, "-m", "scripts.load_test", "--weights", str(state), "--metrics", str(metrics),
-            "--output-dir", str(out)], env):
+            "--output-dir", str(out), "--open-loop"], env):
         sys.exit("load test failed")
 
 

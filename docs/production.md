@@ -25,7 +25,7 @@ outcome.
   0.056, against a target of 0.05.
 - **"Answer only when confident" filtering.** Ranking answers by confidence barely works (Cov@5% is 0.004).
 - **Emotion or paraphrase tasks**, where it loses to untrained baselines.
-- **States much longer than about 400 tokens.** No one has measured accuracy on them.
+- **States longer than the 384 tokens it was trained on.** No one has measured accuracy on them.
 
 See section 7 for the numbers and their sources.
 
@@ -66,6 +66,11 @@ POINTWISE_WEIGHTS=weights/state.pt POINTWISE_METRICS=weights/metrics.json \
 POINTWISE_API_KEY="$(openssl rand -hex 24)" POINTWISE_HOST=0.0.0.0 \
 python -m src.serve_main
 ```
+
+**Apple silicon (development only).** With no CUDA, the server uses the Apple GPU (MPS) in fp16 and runs the same
+bare-process command. It works but is slow: about 9 s per request on an 8 GB M1, against about 140 ms on a T4
+(`reports/pointwise-mac-smoke.md`). The Docker image cannot use the Apple GPU, and on CPU it needs about 7 GB just for
+the fp32 model.
 
 Always start it with `python -m src.serve_main`, not with plain `uvicorn src.serve:app`. Only `serve_main` makes
 `/readyz` fail the moment a shutdown signal arrives, and only it keeps the whole shutdown within
@@ -271,7 +276,7 @@ Two rollbacks need no new artefacts:
 | Calibration gate missed | pooled OOD ECE after T 0.056 (0.0561) vs target 0.05; merged on the served path 0.0576 | `reports/pointwise-results.md`, `reports/merged_check.json` |
 | Weak confidence ranking | Cov@5% on pooled OOD 0.004 (Qwen2.5-1.5B-Instruct 0.171): confidence cannot pick a low-error subset | `reports/pointwise-results.md` |
 | Loses on Emotion and PAWS | Emotion -8.0 points [-11.8, -4.2] vs its own untrained base; vs Qwen2.5-1.5B-Instruct, PAWS -5.8 [-9.6, -2.0] and Emotion -4.4 [-8.0, -1.0] | `reports/pointwise-results.md` |
-| Long states unvalidated | trained on states <= 384 tokens (`--max-state` 384); latency measured at 524-526 tokens; accuracy above about 400 tokens never measured, although the limit allows 4,096 | `src/pointwise/train.py`, `reports/pointwise-load.md` |
+| Long states unvalidated | trained on states <= 384 tokens (`--max-state` 384); latency measured at 524-526 tokens; accuracy above the 384 tokens it was trained on never measured, although the limit allows 4,096 | `src/pointwise/train.py`, `reports/pointwise-load.md` |
 | Cold p95 over the 150 ms target | 160.4 ms, 10.4 ms over (cache hit 58.4 ms meets it) | `reports/pointwise-serving.md` |
 | Cache miss memory shortcut | a miss builds the full L x L mask, so a miss costs as much memory as a cold request; one 524-token state stores 57.3 MiB of KV | `src/pointwise/packing.py`, `reports/pointwise-serving.md` |
 | `/metrics` not rate-limited | protected only by the API key; scrape it from inside your network | `src/serve.py` |

@@ -236,7 +236,7 @@ def load_pointwise(weights: str, metrics: str, device: str | None = None, merge_
     if not (math.isfinite(temperature) and temperature > 0):
         sys.exit(f"FATAL: temperature in {metrics!r} must be a positive number, got {temperature}.")
 
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    device = device or ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     targs = T.parse_args(["--data-dir", ".", "--output-dir", "."])  # run 3's model settings (LoRA r=16)
     model = T.build_model(targs, torch.device(device))
     T.load_trainable(model, state)

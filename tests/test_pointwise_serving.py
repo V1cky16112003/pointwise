@@ -1045,3 +1045,24 @@ def test_adapter_is_merged_unless_switched_off(monkeypatch):
     assert env_flag("POINTWISE_MERGE_LORA", default=True)
     monkeypatch.setenv("POINTWISE_MERGE_LORA", "0")
     assert not env_flag("POINTWISE_MERGE_LORA", default=True)
+
+
+def test_startup_picks_the_apple_gpu_when_there_is_no_cuda(tmp_path, monkeypatch):
+    from src.pointwise import train as T
+
+    weights, metrics = write_state(tmp_path)
+    picked = []
+
+    def stop(args, device):
+        picked.append(device.type)
+        raise SystemExit("stop after the device choice")
+
+    monkeypatch.setattr(T, "build_model", stop)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+    with pytest.raises(SystemExit, match="stop after"):
+        serve.load_pointwise(weights, metrics)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
+    with pytest.raises(SystemExit, match="stop after"):
+        serve.load_pointwise(weights, metrics)
+    assert picked == ["mps", "cpu"]

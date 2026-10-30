@@ -1,5 +1,6 @@
 """Step 7 load test: its statistics, request mix and answer comparison, and the driver against the tiny-model app."""
 import asyncio
+import time
 import copy
 
 import pytest
@@ -95,3 +96,29 @@ def test_driver_against_the_app_and_every_answer_matches_decide(monkeypatch):
         assert L.compare_answers(r["answers"], ref)["max_prob_diff"] < 1e-3
     swapped = model.decide(body_for(records[0]["state"] + 1000), state_cache=StateCache())["answers"]
     assert L.compare_answers(records[0]["answers"], swapped)["max_prob_diff"] > 0  # a mixed-up state is visible
+
+
+def test_arrival_times_are_poisson_at_the_rate():
+    times = L.arrival_times(5.0, 2000.0, seed=0)
+    assert times == sorted(times) and 0 < times[0] and times[-1] < 2000.0
+    assert len(times) / 2000.0 == pytest.approx(5.0, rel=0.05)
+    gaps = [b - a for a, b in zip([0.0] + times, times)]
+    assert sum(g > 0.2 for g in gaps) / len(gaps) == pytest.approx(0.3679, abs=0.03)  # P(gap > 1/rate) = e^-1
+
+
+def test_open_loop_sends_on_schedule_without_waiting_for_answers():
+    async def slow_send(client, i, body, headers):
+        sent = time.perf_counter()
+        await asyncio.sleep(0.3)  # slower than the gaps: a closed loop would fall behind
+        return {"state": i, "status": 200, "sent": sent, "ms": 300.0}
+
+    async def go():
+        return await L.open_loop(None, [0, 1, 2], [0.0, 0.05, 0.1], lambda i: {}, {})
+
+    orig, L.send = L.send, slow_send
+    try:
+        records, wall = asyncio.run(go())
+    finally:
+        L.send = orig
+    sent = [r["sent"] - records[0]["sent"] for r in records]
+    assert sent == pytest.approx([0.0, 0.05, 0.1], abs=0.03) and wall < 0.5
