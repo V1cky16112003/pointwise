@@ -84,10 +84,14 @@ def test_driver_against_the_app_and_every_answer_matches_decide(monkeypatch):
     bodies = {}
     body_for = lambda i: bodies.setdefault(i, L.payload(L.make_state(i, msgs, lambda t: len(tok.encode(t)), 60), k=3))  # noqa: E731
 
+    ids = L.request_mix(12, 0.5, seed=0)
+    for i in ids:  # build bodies first: tok.encode would race the app's threads on the shared tokenizer's flags
+        body_for(i)
+
     async def go():
         transport = httpx.ASGITransport(app=serve.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return await L.closed_loop(client, L.request_mix(12, 0.5, seed=0), body_for, 4, {})
+            return await L.closed_loop(client, ids, body_for, 4, {})
 
     records, wall = asyncio.run(go())
     assert len(records) == 12 and all(r["status"] == 200 for r in records) and wall > 0
