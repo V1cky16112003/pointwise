@@ -1,0 +1,173 @@
+{
+ "startup_s": 15.612384150000025,
+ "gpu_mib_after_load": 3637,
+ "probes": {
+  "healthz_no_key": 200,
+  "readyz_no_key": 200,
+  "metrics_no_key": 401,
+  "metrics_key": 200,
+  "systemone_no_key": 401,
+  "systemone_wrong_key": 401,
+  "systemone_key": 200
+ },
+ "levels": [
+  {
+   "mix": "open-loop cold",
+   "rate_rps": 2.0,
+   "offered_rps": 2.1666666666666665,
+   "clients": 0,
+   "requests": 130,
+   "statuses": {
+    "200": 130
+   },
+   "wall_s": 59.95343830799999,
+   "throughput_rps": 2.1683493669228513,
+   "latency_ms": {
+    "n": 130,
+    "mean": 178.5093113769226,
+    "p50": 141.90480000002026,
+    "p95": 317.21293399999695,
+    "p99": 395.1529319999736,
+    "max": 450.29520299999604
+   },
+   "littles_law_in_flight": 0.38707055231398424,
+   "server_counters": {
+    "pointwise_requests_total{route=\"/v1/systemone\",status=\"200\"}": 130.0,
+    "pointwise_requests_total{route=\"/v1/systemone\",status=\"401\"}": 0.0,
+    "pointwise_overload_rejections_total": 0.0,
+    "pointwise_state_cache_hits_total": 0.0,
+    "pointwise_state_cache_misses_total": 130.0
+   }
+  },
+  {
+   "mix": "open-loop cold",
+   "rate_rps": 4.0,
+   "offered_rps": 4.466666666666667,
+   "clients": 0,
+   "requests": 268,
+   "statuses": {
+    "200": 268
+   },
+   "wall_s": 59.67985157000004,
+   "throughput_rps": 4.490627790614658,
+   "latency_ms": {
+    "n": 268,
+    "mean": 261.55280328358236,
+    "p50": 238.16706200000226,
+    "p95": 510.9011780000401,
+    "p99": 663.3574519999001,
+    "max": 799.2306490000374
+   },
+   "littles_law_in_flight": 1.174536287138424,
+   "server_counters": {
+    "pointwise_requests_total{route=\"/v1/systemone\",status=\"200\"}": 268.0,
+    "pointwise_requests_total{route=\"/v1/systemone\",status=\"401\"}": 0.0,
+    "pointwise_overload_rejections_total": 0.0,
+    "pointwise_state_cache_hits_total": 0.0,
+    "pointwise_state_cache_misses_total": 268.0
+   }
+  },
+  {
+   "mix": "open-loop cold",
+   "rate_rps": 6.0,
+   "offered_rps": 6.116666666666666,
+   "clients": 0,
+   "requests": 367,
+   "statuses": {
+    "200": 356,
+    "503": 11
+   },
+   "wall_s": 60.45228392199999,
+   "throughput_rps": 5.888942102821749,
+   "latency_ms": {
+    "n": 356,
+    "mean": 1283.9040153595547,
+    "p50": 1156.221500000015,
+    "p95": 2678.4926799999766,
+    "p99": 2806.6080700000384,
+    "max": 2830.4749320000155
+   },
+   "littles_law_in_flight": 7.560836412032782,
+   "server_counters": {
+    "pointwise_requests_total{route=\"/v1/systemone\",status=\"200\"}": 356.0,
+    "pointwise_requests_total{route=\"/v1/systemone\",status=\"401\"}": 0.0,
+    "pointwise_requests_total{route=\"/v1/systemone\",status=\"503\"}": 11.0,
+    "pointwise_overload_rejections_total": 11.0,
+    "pointwise_state_cache_hits_total": 0.0,
+    "pointwise_state_cache_misses_total": 356.0
+   }
+  },
+  {
+   "mix": "open-loop cold",
+   "rate_rps": 8.0,
+   "offered_rps": 7.916666666666667,
+   "clients": 0,
+   "requests": 475,
+   "statuses": {
+    "200": 376,
+    "503": 99
+   },
+   "wall_s": 61.804417382999986,
+   "throughput_rps": 6.083707539380884,
+   "latency_ms": {
+    "n": 376,
+    "mean": 2212.7619812180806,
+    "p50": 2390.5721030000677,
+    "p95": 2801.713441000061,
+    "p99": 2870.614008000075,
+    "max": 2881.5180689999806
+   },
+   "littles_law_in_flight": 13.46179674799182,
+   "server_counters": {
+    "pointwise_requests_total{route=\"/v1/systemone\",status=\"200\"}": 376.0,
+    "pointwise_requests_total{route=\"/v1/systemone\",status=\"401\"}": 0.0,
+    "pointwise_requests_total{route=\"/v1/systemone\",status=\"503\"}": 99.0,
+    "pointwise_overload_rejections_total": 99.0,
+    "pointwise_state_cache_hits_total": 0.0,
+    "pointwise_state_cache_misses_total": 376.0
+   }
+  }
+ ],
+ "shutdown": {
+  "readyz_after_sigterm": "RemoteProtocolError",
+  "readyz_probe_ms": 98.78309800001261,
+  "exit_s": 2.838945875000036,
+  "exit_code": -15,
+  "grace_s": 25.0,
+  "exited_inside_grace": true,
+  "sent_before_sigterm": {
+   "200": 30,
+   "503": 1
+  },
+  "sent_after_sigterm": {
+   "ReadError": 1,
+   "ConnectError": 1
+  },
+  "sent_before_all_200_or_503": true
+ },
+ "correctness": {
+  "responses": 1165,
+  "distinct_states": 1165,
+  "questions": 9320,
+  "max_prob_diff": 0.0,
+  "top_option_flips": []
+ },
+ "in_process": {
+  "miss": {
+   "n": 60,
+   "mean": 160.67934885000832,
+   "p50": 160.97994599999765,
+   "p95": 163.55133500007923,
+   "p99": 166.69128199998795,
+   "max": 166.69128199998795
+  },
+  "hit": {
+   "n": 60,
+   "mean": 51.47348638332687,
+   "p50": 50.92570099998284,
+   "p95": 53.016089999914584,
+   "p99": 65.82157499997265,
+   "max": 65.82157499997265
+  }
+ }
+}

@@ -190,6 +190,20 @@ the slow tail.
 No request in these runs got a status other than 200. Answers under load matched serial `decide()` within 0.0036.
 There were 4 top-option flips, all on near ties with margins of 0.0005 or less.
 
+**Through HTTP, open-loop arrivals** (requests arrive on a random Poisson schedule at a fixed rate, as real traffic
+does, whether or not earlier ones have answered; all new states; `reports/pointwise-load.md`, "Open-loop arrivals",
+which uses `reports/load_test_open.json`):
+
+| Rate req/s | Served req/s | p50 ms | p95 ms | p99 ms | 503s |
+|---|---|---|---|---|---|
+| 2 | 2.17 | 142 | 317 | 395 | 0 |
+| 4 | 4.49 | 238 | 511 | 663 | 0 |
+| 6 | 5.89 | 1,156 | 2,678 | 2,807 | 11 of 367 (3%) |
+| 8 | 6.08 | 2,391 | 2,802 | 2,871 | 99 of 475 (21%) |
+
+Random arrivals sometimes bunch up, so the tail grows long before the GPU is full: at 2 req/s, a third of capacity,
+p95 is already twice a single request's time. All 1,165 200 responses (warm-up, open loop and shutdown) matched serial `decide()` exactly.
+
 **Overload burst** (`reports/pointwise-load.md`, "Overload burst"): of 56 requests sent at once, 17 got 200 and 39 got
 503 with `Retry-After: 1`. None got a 500. The 503s took 260 ms median and 302 ms max.
 
@@ -210,8 +224,12 @@ accept, and cap the requests in flight per instance to match:
 | ~600 ms | 4 | p95 559 ms at 4 clients (new states) |
 | ~2.5 s | 16 | p95 2,434 ms at 16 clients (new states) |
 
-Add instances to serve more traffic; a longer queue only makes requests wait longer. Instances needed ≈ peak req/s ÷
-6.5 (all new states), plus headroom. The default queue (16 waiting, 10 s timeout) admits waits of about 2.4 s before it
+Real traffic arrives at random, so size by arrival rate as well (open-loop table above): keep the average load per
+T4 at or below about **2 req/s** for p95 near 300 ms, or **4 req/s** for p95 near 500 ms.
+
+Add instances to serve more traffic; a longer queue only makes requests wait longer. Instances needed ≈ peak req/s ÷ 2 for
+p95 near 300 ms, or ÷ 4 for p95 near 500 ms (all new states). Dividing by the T4's maximum (about 6.1 req/s open-loop, 6.5 closed-loop) leaves no headroom:
+at 6 req/s the open-loop p95 was 2.7 s and 3% of requests got 503. The default queue (16 waiting, 10 s timeout) admits waits of about 2.4 s before it
 starts answering 503 quickly.
 
 ## 6. Operating it
@@ -282,7 +300,7 @@ Two rollbacks need no new artefacts:
 | `/metrics` not rate-limited | protected only by the API key; scrape it from inside your network | `src/serve.py` |
 | GPU lock not FIFO | waiters are not served in arrival order, so one unlucky request can wait up to `POINTWISE_QUEUE_TIMEOUT_S` (10 s) while later ones go first | `src/serve.py` (`threading.Lock`) |
 | Image never run on a GPU | the image is built and import-checked in CI only; the server process and its pins ran on a T4 | `reports/pointwise-load.md`, "Limitations of this test" |
-| Open-loop load untested | closed-loop clients only, plus one 56-request burst; p99 under bursty arrivals is unknown | `reports/pointwise-load.md` |
+| Open-loop load measured on new states only | Poisson arrivals at 2-8 req/s were measured with every state new; the cached mix is closed-loop only | `reports/pointwise-load.md`, "Open-loop arrivals" |
 | HTTP overhead unmeasured | the run could only bound it below the session's drift of about 20 ms | `reports/pointwise-load.md`, "HTTP overhead" |
 | `src/data.py` broken under `datasets` 5 | the Banking77 loader runs a dataset script that `datasets` 5 refuses; the Phase 0 evaluation and the data build need Kaggle's preinstalled `datasets`. Serving is unaffected. | `reports/pointwise-load.md` |
 

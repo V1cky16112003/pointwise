@@ -84,10 +84,45 @@ A/B (as in step 4) would be needed to measure it.
 - The default queue (16, 10 s timeout) admits waits of ~2.4 s before it rejects; anything past it gets a fast 503 with
   Retry-After, never a 500 or a hang.
 
+## Open-loop arrivals (2026-10-30)
+
+A second Kaggle T4 session, commit 46ebfa7, `scripts/load_test.py --open-loop`; raw numbers in
+`reports/load_test_open.json`. Same server, weights and request shape (one ~526-token state, k=8), every state new.
+Requests arrive on a Poisson schedule at a fixed rate for 60 s each, whether or not earlier ones have answered, as real
+traffic does. (Poisson: arrivals are independent, so the gaps between them are random, and bursts happen by chance.)
+Start-up 15.6 s, 3,637 MiB after load.
+
+| Rate (req/s) | Offered | Status | Served req/s | p50 ms | p95 ms | p99 ms | max ms |
+|---|---|---|---|---|---|---|---|
+| 2 | 2.17 | 200 x 130 | 2.17 | 142 | 317 | 395 | 450 |
+| 4 | 4.47 | 200 x 268 | 4.49 | 238 | 511 | 663 | 799 |
+| 6 | 6.12 | 200 x 356, 503 x 11 | 5.89 | 1,156 | 2,678 | 2,807 | 2,830 |
+| 8 | 7.92 | 200 x 376, 503 x 99 | 6.08 | 2,391 | 2,802 | 2,871 | 2,882 |
+
+Every 503 was counted in `pointwise_overload_rejections_total`; no 500s, no transport errors.
+
+**What it shows.** The tail grows long before the GPU is full, as the closed-loop section predicted. At 2 req/s
+(about a third of capacity) the median request is barely slower than alone (142 vs 136 ms), but p95 is more than
+double, 317 ms: by chance two or three requests sometimes arrive together and queue. At 4 req/s, about 70% of
+capacity, p95 is 511 ms. At 6 req/s the server is at capacity (~6 req/s for new states), the queue fills, and 3% are
+rejected; at 8 req/s it serves its ~6.1 req/s maximum and rejects the rest (21%) quickly instead of letting latency
+grow without bound. The 16-slot queue caps p99 at about 2.9 s at any rate.
+
+**Correctness.** All 1,165 200 responses (5 warm-up, 1,130 open-loop, 30 during shutdown) matched serial `decide()` exactly (max difference 0.0,
+no flips): every state was new, so the cache never changed the order of operations.
+
+**Shutdown under open-loop-sized load.** SIGTERM after 3 s: the fresh `/readyz` probe's connection was dropped
+(`RemoteProtocolError`, i.e. not ready) within 99 ms; of the 31 requests sent before the signal, 30 finished with 200
+and 1 got 503; the process exited 2.8 s after the signal, inside the 25 s grace.
+
+**Sizing from this run.** Keep a T4's average load at or below about **2 req/s** (one-third of capacity) for p95 near
+300 ms, and below **4 req/s** for p95 near 500 ms. Instances needed ≈ peak req/s ÷ 2 (p95 ~300 ms) or ÷ 4 (p95
+~500 ms), not ÷ 6.5: 6.5 req/s is the most one T4 can do, not a rate it can serve with a short tail.
+
 ## Limitations of this test
 
-- Closed-loop clients only; no open-loop arrival rate, so tail behaviour under bursty traffic is not measured beyond
-  the one burst.
+- Open-loop rates were measured with all states new (no cache hits) and 60 s per rate; the cached mix was only
+  measured closed-loop.
 - The image itself was not run: Kaggle cannot run containers, so this tested the server process and its pins.
 - One state length (526 tokens) and k=8; T4 thermal drift within the session is likely (above).
 - `src/data.py`'s Banking77 loader runs a dataset script that `datasets` 5 refuses; the load test read the Hub's
