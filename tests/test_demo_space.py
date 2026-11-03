@@ -6,7 +6,8 @@ import sys
 from pathlib import Path
 
 import pytest
-import requests
+
+requests = pytest.importorskip("requests")  # not in requirements-core.txt; the full CI job runs these
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "demo"))
 import pointwise_client as client  # noqa: E402
