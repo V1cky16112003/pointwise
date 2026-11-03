@@ -28,8 +28,10 @@ limitation: confidence is not well enough calibrated for fully automated decisio
 Pick a preset (a Banking77 message router, a QNLI-style answer check, or a TweetEval-style sentiment read), press run,
 and see a probability bar for every option. The page is a small CPU app on Modal that calls the Pointwise service on a
 T4; the API key stays on the server. The GPU scales to zero, so the first run after a quiet minute shows "Waking up the
-GPU, about 20 seconds" before the cards appear. Each visitor gets 6 runs a minute, and a run is capped at 4 questions,
-10 options per question and 3,000 characters of state. How it is built and deployed: [`docs/modal-demo.md`](docs/modal-demo.md).
+GPU, about 20 seconds" before the cards appear (the page itself can take a few seconds more if it has been idle for
+two minutes). A rate limit of 6 runs a minute per IP guards the paid GPU, and a run is capped at 4 questions, 10
+options per question and about 3,000 characters of state. Anyone with the link can wake the GPU, so set a Modal spend
+limit before sharing it widely. How it is built and deployed: [`docs/modal-demo.md`](docs/modal-demo.md).
 
 ## Quickstart: call it
 
@@ -116,13 +118,19 @@ API key in a Modal secret and `state.pt` and `metrics.json` in a Modal volume. `
 page above as a separate CPU function that calls it.
 
 ```bash
+git lfs pull && ls -lh weights/state.pt                  # must be about 74 MB, not a pointer file
+export KEY=$(openssl rand -hex 24)                       # keep it; an empty key means no auth
 modal secret create pointwise-key POINTWISE_API_KEY=$KEY
 modal volume create pointwise-weights
 modal volume put pointwise-weights weights/state.pt /state.pt
 modal volume put pointwise-weights weights/metrics.json /metrics.json
-modal deploy deploy/modal_app.py     # the service
-modal deploy deploy/modal_demo.py    # the demo page (needs a pointwise-demo secret with POINTWISE_URL)
+modal deploy deploy/modal_app.py                         # the service; prints its .modal.run URL
+modal secret create pointwise-demo POINTWISE_URL=<that .modal.run URL>
+modal deploy deploy/modal_demo.py                        # the demo page
 ```
+
+The base model (about 3.4 GB) is baked into the Modal image at build time, so the first build is slow. To call the
+service, use its `.modal.run` URL in place of `localhost:8000` in the quickstart.
 
 Measured once on 2026-11-03: a cold start took about 20 s (19.4 s in Modal's log), and the same request on a warm
 container took 0.51 s from a Mac. Those are single samples, not a distribution, and the load numbers below were
