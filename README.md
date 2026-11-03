@@ -17,13 +17,23 @@ adapter merged), served by a hardened FastAPI server with:
 - a graceful drain on shutdown;
 - a CUDA Docker image.
 
-It has been load-tested on a T4. **Read [`docs/production.md`](docs/production.md) before you deploy it.** That guide
+It has been load-tested on a T4 and is deployed on Modal with a public demo (see "Live demo"). **Read [`docs/production.md`](docs/production.md) before you deploy it.** That guide
 covers every setting, status code, metric and capacity number, plus the known limitations. The most important
 limitation: confidence is not well enough calibrated for fully automated decisions.
 
+## Live demo
+
+**Try it: <https://v1cky16112003--pointwise-demo-web.us-east.modal.run>**
+
+Pick a preset (a Banking77 message router, a QNLI-style answer check, or a TweetEval-style sentiment read), press run,
+and see a probability bar for every option. The page is a small CPU app on Modal that calls the Pointwise service on a
+T4; the API key stays on the server. The GPU scales to zero, so the first run after a quiet minute shows "Waking up the
+GPU, about 20 seconds" before the cards appear. Each visitor gets 6 runs a minute, and a run is capped at 4 questions,
+10 options per question and 3,000 characters of state. How it is built and deployed: [`docs/modal-demo.md`](docs/modal-demo.md).
+
 ## Quickstart: call it
 
-Start it with Docker (below), then:
+Start it with Docker (below) or on Modal (see "Deploy on Modal"), then:
 
 ```bash
 curl -s localhost:8000/v1/systemone -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{
@@ -57,15 +67,14 @@ Probabilities are rounded to 4 decimals. Every response carries an `X-Request-Id
 - `state.pt`: the LoRA adapter and the pointer head, step 1541.
 - `metrics.json`: the fitted temperature, T 1.516.
 
-The server will not start if the `best_step` in `metrics.json` is not the step stored in the weights. `state.pt` is in
-the Kaggle dataset `v1cky1611/pointwise-run3-weights`. Both files are in `artifacts/run3/` on the machine that trained
-run 3; they are git-ignored and never baked into the image. On first start, the base model Qwen3-1.7B-Base (about
-3.4 GB) downloads from Hugging Face into the mounted cache volume.
+The server will not start if the `best_step` in `metrics.json` is not the step stored in the weights. Both files are
+tracked in this repo under `weights/` (`state.pt`, about 74 MB, through Git LFS; a copy is also in the Kaggle dataset
+`v1cky1611/pointwise-run3-weights`). They are never baked into the Docker image. On first start, the base model
+Qwen3-1.7B-Base (about 3.4 GB) downloads from Hugging Face into the mounted cache volume.
 
 ```bash
-mkdir -p weights
-kaggle datasets download v1cky1611/pointwise-run3-weights -p weights --unzip   # state.pt
-cp artifacts/run3/metrics.json weights/
+git lfs pull                       # makes weights/state.pt the real file, not a pointer
+ls -lh weights/state.pt weights/metrics.json
 ```
 
 **2. Build and run.** You need the NVIDIA Container Toolkit and a driver that supports CUDA 12.8 (version 570 or newer).
@@ -99,6 +108,27 @@ important ones:
 **4. Stop it cleanly.** `docker stop <container>` sends SIGTERM. `/readyz` fails at once, so a load balancer stops
 routing traffic to the container. New data requests get 503, and requests already running finish within
 `POINTWISE_SHUTDOWN_GRACE_S`.
+
+## Deploy on Modal (one T4, scales to zero)
+
+`deploy/modal_app.py` runs the same server (`python -m src.serve_main`) on one T4 behind a `.modal.run` URL, with the
+API key in a Modal secret and `state.pt` and `metrics.json` in a Modal volume. `deploy/modal_demo.py` deploys the demo
+page above as a separate CPU function that calls it.
+
+```bash
+modal secret create pointwise-key POINTWISE_API_KEY=$KEY
+modal volume create pointwise-weights
+modal volume put pointwise-weights weights/state.pt /state.pt
+modal volume put pointwise-weights weights/metrics.json /metrics.json
+modal deploy deploy/modal_app.py     # the service
+modal deploy deploy/modal_demo.py    # the demo page (needs a pointwise-demo secret with POINTWISE_URL)
+```
+
+Measured once on 2026-11-03: a cold start took about 20 s (19.4 s in Modal's log), and the same request on a warm
+container took 0.51 s from a Mac. Those are single samples, not a distribution, and the load numbers below were
+measured on Kaggle, not on Modal. A T4 costs about $0.59 an hour while a container runs. Anyone with the service URL
+can wake the GPU, so set a spend limit in the Modal dashboard. Full steps, commands and cost notes:
+[`docs/modal.md`](docs/modal.md).
 
 ## How it works
 
@@ -185,8 +215,10 @@ The full table, with every number and its source, is in `docs/production.md`, se
 - **Weak tasks:** emotion and paraphrase tasks are weak.
 - **Long states:** accuracy on states longer than the 384 tokens it was trained on was never measured. The server's limit allows 4,096.
 - **Cold latency:** cold p95 is 160 ms, against the 150 ms target.
-- **Untested:** the Docker image itself has never run on a GPU (the same server process and pins have), and
-  open-loop load is untested.
+- **Untested:** the Docker image itself has never run on a GPU (the same server process and pins have, on Kaggle and on
+  Modal), and open-loop load is untested. Whether the shutdown drain runs on Modal was not checked.
+- **Demo:** its three presets were picked from Pointwise's stronger tasks and were not scored before release, so one
+  example proves nothing about accuracy; use the Results table. Its rate limit is a per-container speed bump.
 - **Evidence base:** one training run with one seed; calibration differences have no confidence intervals.
 
 ## Repo layout
@@ -198,7 +230,12 @@ src/serve.py            FastAPI: /v1/systemone, /healthz, /readyz, /metrics (and
 src/serve_ops.py        request ids, API key, drain flag, metrics middleware
 src/serve_main.py       `python -m src.serve_main`: the one-process runner that drains on SIGTERM
 Dockerfile              CUDA 12.8 image for one GPU
+deploy/                 Modal apps: modal_app.py (the service on a T4), modal_demo.py (the demo page on CPU)
+demo/pointwise_app.py   the Gradio demo page (demo/app.py is the older Phase 0 demo)
+weights/                run 3's state.pt (Git LFS) and metrics.json
 docs/production.md      the operator's guide
+docs/modal.md           deploying the service on Modal
+docs/modal-demo.md      deploying and checking the demo page
 docs/designs/           architecture, plans and run logs for every phase
 reports/                evaluation, latency, load and token reports, with their raw JSON
 scripts/                Kaggle job, evaluation, latency profiling, load test, token counts
