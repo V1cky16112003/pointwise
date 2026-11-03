@@ -82,7 +82,9 @@ def test_driver_against_the_app_and_every_answer_matches_decide(monkeypatch):
     monkeypatch.setattr(serve, "_state_cache", StateCache())
     msgs = [f"my card {i} was charged twice" for i in range(20)]
     bodies = {}
-    body_for = lambda i: bodies.setdefault(i, L.payload(L.make_state(i, msgs, lambda t: len(tok.encode(t)), 60), k=3))  # noqa: E731
+    # `in` check, not setdefault: setdefault evaluates its default every call and would re-encode on the racing threads
+    body_for = lambda i: bodies[i] if i in bodies else bodies.setdefault(  # noqa: E731
+        i, L.payload(L.make_state(i, msgs, lambda t: len(tok.encode(t)), 60), k=3))
 
     ids = L.request_mix(12, 0.5, seed=0)
     for i in ids:  # build bodies first: tok.encode would race the app's threads on the shared tokenizer's flags
