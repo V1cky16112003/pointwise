@@ -299,7 +299,7 @@ Two rollbacks need no new artefacts:
 | Cache miss memory shortcut | a miss builds the full L x L mask, so a miss costs as much memory as a cold request; one 524-token state stores 57.3 MiB of KV | `src/pointwise/packing.py`, `reports/pointwise-serving.md` |
 | `/metrics` not rate-limited | protected only by the API key; scrape it from inside your network | `src/serve.py` |
 | GPU lock not FIFO | waiters are not served in arrival order, so one unlucky request can wait up to `POINTWISE_QUEUE_TIMEOUT_S` (10 s) while later ones go first | `src/serve.py` (`threading.Lock`) |
-| Image never run on a GPU | the image is built and import-checked in CI only; the server process and its pins ran on a T4 | `reports/pointwise-load.md`, "Limitations of this test" |
+| Docker image never run on a GPU | the `Dockerfile` image is built and import-checked in CI only; the server process and its pins ran on a T4, on Kaggle and on Modal (`docs/modal.md`, a different image) | `reports/pointwise-load.md`, "Limitations of this test" |
 | Open-loop load measured on new states only | Poisson arrivals at 2-8 req/s were measured with every state new; the cached mix is closed-loop only | `reports/pointwise-load.md`, "Open-loop arrivals" |
 | HTTP overhead unmeasured | the run could only bound it below the session's drift of about 20 ms | `reports/pointwise-load.md`, "HTTP overhead" |
 | `src/data.py` broken under `datasets` 5 | the Banking77 loader runs a dataset script that `datasets` 5 refuses; the Phase 0 evaluation and the data build need Kaggle's preinstalled `datasets`. Serving is unaffected. | `reports/pointwise-load.md` |
