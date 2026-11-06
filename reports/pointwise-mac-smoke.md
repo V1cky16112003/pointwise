@@ -1,5 +1,7 @@
 # Pointwise on an Apple M1 (smoke test, 2026-10-30)
 
+> Note (2026-11-05): the `/metrics` endpoint and the Prometheus code it used were removed from the server; this report describes the earlier version, and monitoring will be chosen later.
+
 A functional check, not a performance one. MacBook Air M1, 8 GB, macOS; run 3 (`state.pt` step 1541, T 1.516,
 adapter merged); torch 2.12.1 with the MPS backend (Apple's GPU), fp16. No model or serving setting was changed.
 

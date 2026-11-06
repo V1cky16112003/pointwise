@@ -12,7 +12,7 @@ contract, so a Jev or Kev client can call it unchanged.
 adapter merged), served by a hardened FastAPI server with:
 - request limits;
 - an overload queue that answers 503 with `Retry-After`;
-- liveness, readiness and Prometheus metrics;
+- liveness and readiness probes;
 - an optional API key;
 - a graceful drain on shutdown;
 - a CUDA Docker image.
@@ -105,7 +105,7 @@ important ones:
 | `POINTWISE_SHUTDOWN_GRACE_S` | 25 | the drain budget on SIGTERM; keep it under `--stop-timeout` |
 
 **3. Check it.** `/readyz` returns 200 once the model has loaded: 14.6 s on a T4 with the model already cached.
-`/healthz` is liveness. `/metrics` serves Prometheus text and needs the key.
+`/healthz` is liveness.
 
 **4. Stop it cleanly.** `docker stop <container>` sends SIGTERM. `/readyz` fails at once, so a load balancer stops
 routing traffic to the container. New data requests get 503, and requests already running finish within
@@ -121,6 +121,7 @@ page above as a separate CPU function that calls it.
 git lfs pull && ls -lh weights/state.pt                  # must be about 74 MB, not a pointer file
 export KEY=$(openssl rand -hex 24)                       # keep it; an empty key means no auth
 modal secret create pointwise-key POINTWISE_API_KEY=$KEY
+# Required by deploy/modal_app.py: create pointwise-grafana as in docs/monitoring.md (monitoring setup)
 modal volume create pointwise-weights
 modal volume put pointwise-weights weights/state.pt /state.pt
 modal volume put pointwise-weights weights/metrics.json /metrics.json
@@ -234,8 +235,8 @@ The full table, with every number and its source, is in `docs/production.md`, se
 ```
 src/pointwise/          the model: schema (API contract), encoding, packing, pointer head, training, metrics
 src/pointwise/data/     training-data converters (public sources, policy generator, rule records)
-src/serve.py            FastAPI: /v1/systemone, /healthz, /readyz, /metrics (and the Phase 0 /predict demo)
-src/serve_ops.py        request ids, API key, drain flag, metrics middleware
+src/serve.py            FastAPI: /v1/systemone, /healthz, /readyz (and the Phase 0 /predict demo)
+src/serve_ops.py        request ids, API key, drain flag, request log middleware
 src/serve_main.py       `python -m src.serve_main`: the one-process runner that drains on SIGTERM
 Dockerfile              CUDA 12.8 image for one GPU
 deploy/                 Modal apps: modal_app.py (the service on a T4), modal_demo.py (the demo page on CPU)

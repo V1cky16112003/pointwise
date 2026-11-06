@@ -14,7 +14,7 @@ Two models, each switched on by an env var, at least one required:
   `Authorization: Bearer <key>`), POINTWISE_STUCK_AFTER_S (60; /readyz fails when one request has held the GPU this long)
   and POINTWISE_SHUTDOWN_GRACE_S (25, at least 3: the whole shutdown, to be kept below your orchestrator's kill timeout.
   Under src.serve_main 1 s is held back, uvicorn gets 80% of the rest and the drain the remainder; under plain
-  `uvicorn src.serve:app` uvicorn's wait is unbounded and the drain may use the whole grace). GET /healthz, /readyz, /metrics.
+  `uvicorn src.serve:app` uvicorn's wait is unbounded and the drain may use the whole grace). GET /healthz, /readyz.
   Run with `python -m src.serve_main` for a drain that starts at the shutdown signal.
 
 Applies: fail-fast on missing/corrupted adapter (1A), structured error
@@ -37,11 +37,12 @@ from pathlib import Path
 
 import torch
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse
 from peft import PeftModel
 from pydantic import BaseModel, Field
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from src import telemetry
 from src.config import load_task_config
 from src.evaluate import generate_labels_batch
 from src.evaluate_core import format_label_for_display, parse_label
@@ -81,7 +82,7 @@ DEFAULT_MAX_QUEUE, DEFAULT_QUEUE_TIMEOUT_S = 16, 10.0
 DEFAULT_STUCK_AFTER_S = 60.0
 # Every waiting request holds one thread of FastAPI's sync-route pool (anyio default 40), as does the one holding the GPU
 # and each request still tokenising. A longer queue would fill the pool, and the requests beyond it would wait unseen,
-# outside the queue and its timeout. 24 leaves some headroom for the tokenising threads. Any health or metrics route
+# outside the queue and its timeout. 24 leaves some headroom for the tokenising threads. Any probe route
 # added later must be `async def`, so it never needs a pool thread.
 MAX_QUEUE_LIMIT = 24
 _max_questions = DEFAULT_MAX_QUESTIONS
@@ -95,7 +96,7 @@ _stuck_after = DEFAULT_STUCK_AFTER_S  # /readyz reports not ready once one reque
 _shutdown_grace = DEFAULT_SHUTDOWN_GRACE_S
 _waiting = 0
 _last_not_ready: str | None = None  # so /readyz logs a reason when it changes, not on every probe
-_rejected = 0  # requests turned away with a 503 for overload since start
+_busy_total = 0.0  # seconds the GPU has held requests since start (cost monitoring)
 _busy_since: float | None = None  # monotonic start of the request holding the GPU; a hung one shows as a growing age
 _queue_lock = threading.Lock()
 
@@ -140,9 +141,8 @@ def load_model(adapter_dir: str) -> None:
 
 def _overloaded(reason: str) -> HTTPException:
     """Count and log a turned-away request (metadata only), and build its 503."""
-    global _rejected
+    telemetry.record_overload()
     with _queue_lock:
-        _rejected += 1
         waiting, since = _waiting, _busy_since  # one read each: the holder may clear _busy_since at any moment
     busy_for = None if since is None else time.monotonic() - since
     logger.warning(f"overloaded: {reason}; waiting={waiting} gpu_busy_for={'idle' if busy_for is None else f'{busy_for:.1f}s'}")
@@ -153,7 +153,7 @@ def _overloaded(reason: str) -> HTTPException:
 def _gpu():
     """Hold the GPU lock for one request. If it is busy, wait only when the queue has room and only for
     _queue_timeout seconds; otherwise raise a 503. Only requests that really have to wait are counted as waiting."""
-    global _waiting, _busy_since
+    global _waiting, _busy_since, _busy_total
     if not _gpu_lock.acquire(blocking=False):
         with _queue_lock:
             full = _waiting >= _max_queue
@@ -167,14 +167,24 @@ def _gpu():
                 _waiting -= 1
         if not acquired:
             raise _overloaded(f"waited {_queue_timeout:g}s for the GPU")
+    started = time.monotonic()
     with _queue_lock:
-        _busy_since = time.monotonic()
+        _busy_since = started
     try:
         yield
     finally:
         with _queue_lock:
+            _busy_total += time.monotonic() - started
             _busy_since = None
         _gpu_lock.release()
+
+
+def _gpu_seconds() -> tuple[float, float]:
+    """(age of the request holding the GPU, total seconds the GPU has held requests, that one included), read together."""
+    with _queue_lock:
+        total, since = _busy_total, _busy_since
+    age = 0.0 if since is None else time.monotonic() - since
+    return age, total + age
 
 
 class BodyLimit:
@@ -310,10 +320,14 @@ async def _lifespan(_: FastAPI):
     OPS.draining = OPS.signalled  # a restarted app must not begin life draining, but a SIGTERM that arrived first stands
     _last_not_ready = None  # a new run starts with a clean slate for /readyz's log-on-change
     configure_from_env()
+    telemetry.start(lambda: _waiting, lambda: _gpu_seconds()[0], lambda: _gpu_seconds()[1])
     try:
         yield
     finally:
-        await _drain()
+        try:
+            await _drain()
+        finally:
+            await asyncio.to_thread(telemetry.shutdown)  # last batch out before the container stops, even if the drain is cancelled
 
 
 app = FastAPI(title="Pointwise and Banking Support Intent Classifier", lifespan=_lifespan)
@@ -372,8 +386,14 @@ def systemone(request: SystemOneRequest) -> dict:
         # tokenizer, which a stress test shows is safe (test_the_shared_tokenizer_encodes_identically_from_many_threads).
         encoded = _pointwise.encode(request)
         with _gpu():
-            hits = _state_cache.hits
-            response = _pointwise.decide(request, state_cache=_state_cache, encoded=encoded)
+            hits, misses = _state_cache.hits, _state_cache.misses
+            try:
+                response = _pointwise.decide(request, state_cache=_state_cache, encoded=encoded)
+            finally:  # a lookup that then fails is still a lookup
+                for _ in range(_state_cache.hits - hits):
+                    telemetry.record_cache(True)
+                for _ in range(_state_cache.misses - misses):
+                    telemetry.record_cache(False)
             cached = _state_cache.hits > hits
     except ContextOverflow as exc:
         raise HTTPException(status_code=422, detail={"error": "context_overflow", "message": str(exc)}) from exc
@@ -402,8 +422,8 @@ def readiness() -> tuple[bool, str]:
     return True, "ready"
 
 
-# The three routes below are `async def` on purpose: they run on the event loop, never on a pool thread, so a full
-# request queue cannot starve a health probe or a metrics scrape.
+# The two routes below are `async def` on purpose: they run on the event loop, never on a pool thread, so a full
+# request queue cannot starve a health probe.
 @app.get("/healthz")
 async def healthz() -> dict:
     """Liveness: the process is up and answering."""
@@ -423,25 +443,3 @@ async def readyz():
         logger.warning(f"readyz: not ready: {reason}")
         _last_not_ready = kind
     return JSONResponse({"status": "not ready"}, status_code=503)
-
-
-@app.get("/metrics")
-async def metrics() -> PlainTextResponse:
-    """Prometheus text format: request counts and latency, queue, GPU and state-cache gauges."""
-    since = _busy_since
-    ready, _ = readiness()
-    rows = [
-        ("pointwise_ready", "gauge", "1 if /readyz would answer 200.", int(ready)),
-        ("pointwise_queue_waiting", "gauge", "Requests waiting for the GPU.", _waiting),
-        ("pointwise_gpu_busy_seconds", "gauge", "How long the request holding the GPU has run (0 if idle).",
-         0 if since is None else round(time.monotonic() - since, 3)),
-        ("pointwise_overload_rejections_total", "counter", "Requests turned away with a 503 for overload.", _rejected),
-    ]
-    if _state_cache is not None:
-        rows += [
-            ("pointwise_state_cache_hits_total", "counter", "Requests whose state was already cached.", _state_cache.hits),
-            ("pointwise_state_cache_misses_total", "counter", "Requests whose state was not cached.", _state_cache.misses),
-            ("pointwise_state_cache_entries", "gauge", "States currently cached.", len(_state_cache)),
-            ("pointwise_state_cache_tokens", "gauge", "State tokens currently cached.", _state_cache.stored_tokens()),
-        ]
-    return PlainTextResponse(OPS.metrics.render(rows), media_type="text/plain; version=0.0.4")

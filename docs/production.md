@@ -111,7 +111,6 @@ together with each default.
 | `POST /v1/systemone` | key, if set | the decision (schema in `src/pointwise/schema.py`) |
 | `GET /healthz` | never | **liveness**: 200 `{"status":"ok"}` whenever the process answers. It never touches the GPU. |
 | `GET /readyz` | never | **readiness**: 200 when this instance should get traffic. It answers 503 when no model is loaded, after a shutdown signal, or when one request has held the GPU past `POINTWISE_STUCK_AFTER_S`. The reason goes to the log, not to the response. |
-| `GET /metrics` | key, if set | Prometheus text format; it still answers while the server drains |
 
 *Liveness vs readiness:* liveness asks "is the process alive, or should it be restarted?". Readiness asks "should
 traffic go here right now?". A server that is loading, draining or stuck is alive but not ready. Restarting it would
@@ -143,20 +142,13 @@ request. Use it to match a client's error to a log line.
 - Errors log the exception type and the file:line frames. They never log the message, which could hold caller text.
 
 The body, the state, the questions and the query string are never logged. Failed-auth lines are capped at 10 per 10 s,
-followed by a count of how many were left out. Probes and scrapes are logged only when they fail.
+followed by a count of how many were left out. Probes are logged only when they fail.
 
-**Metrics** (`/metrics`):
-
-| Metric | Type | Meaning |
-|---|---|---|
-| `pointwise_requests_total{route,status}` | counter | HTTP requests by route and status |
-| `pointwise_request_duration_seconds{route}` | histogram | time to answer, with buckets 0.025-12.8 s |
-| `pointwise_ready` | gauge | 1 if `/readyz` would answer 200 |
-| `pointwise_queue_waiting` | gauge | requests waiting for the GPU |
-| `pointwise_gpu_busy_seconds` | gauge | how long the current request has held the GPU (0 when idle) |
-| `pointwise_overload_rejections_total` | counter | overload 503s |
-| `pointwise_state_cache_hits_total` / `_misses_total` | counter | state cache hits and misses |
-| `pointwise_state_cache_entries` / `_tokens` | gauge | states and state tokens currently cached |
+**Monitoring.** There is no `/metrics` endpoint. When `OTEL_EXPORTER_OTLP_ENDPOINT` is set (on Modal, from the Secret
+`pointwise-grafana`), the server pushes OpenTelemetry metrics to Grafana Cloud every 15 s and sends the last batch at
+shutdown; see `docs/monitoring.md`. Without that variable nothing is pushed. The log lines above and `/readyz` work either
+way. Overload shows as a `status=503` request line plus an `overloaded:` warning; a shutdown drain also gives 503 but has
+no such warning.
 
 ## 5. Capacity and latency (measured on one T4)
 
@@ -297,7 +289,7 @@ Two rollbacks need no new artefacts:
 | Long states unvalidated | trained on states <= 384 tokens (`--max-state` 384); latency measured at 524-526 tokens; accuracy above the 384 tokens it was trained on never measured, although the limit allows 4,096 | `src/pointwise/train.py`, `reports/pointwise-load.md` |
 | Cold p95 over the 150 ms target | 160.4 ms, 10.4 ms over (cache hit 58.4 ms meets it) | `reports/pointwise-serving.md` |
 | Cache miss memory shortcut | a miss builds the full L x L mask, so a miss costs as much memory as a cold request; one 524-token state stores 57.3 MiB of KV | `src/pointwise/packing.py`, `reports/pointwise-serving.md` |
-| `/metrics` not rate-limited | protected only by the API key; scrape it from inside your network | `src/serve.py` |
+| Metrics are pushed, not scraped | no `/metrics` endpoint; an idle (scaled-to-zero) service sends nothing, so there is no "not ready" signal and no alerts are set | `src/telemetry.py`, `docs/monitoring.md` |
 | GPU lock not FIFO | waiters are not served in arrival order, so one unlucky request can wait up to `POINTWISE_QUEUE_TIMEOUT_S` (10 s) while later ones go first | `src/serve.py` (`threading.Lock`) |
 | Docker image never run on a GPU | the `Dockerfile` image is built and import-checked in CI only; the server process and its pins ran on a T4, on Kaggle and on Modal (`docs/modal.md`, a different image) | `reports/pointwise-load.md`, "Limitations of this test" |
 | Open-loop load measured on new states only | Poisson arrivals at 2-8 req/s were measured with every state new; the cached mix is closed-loop only | `reports/pointwise-load.md`, "Open-loop arrivals" |

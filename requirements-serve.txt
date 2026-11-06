@@ -29,4 +29,7 @@ uvicorn==0.49.0  # src/serve_main.py overrides Server.handle_exit; checked again
 pydantic==2.13.4
 httpx==0.28.1  # fastapi's TestClient, tests only
 
+opentelemetry-sdk==1.44.0  # src/telemetry.py; pushes metrics only when OTEL_EXPORTER_OTLP_ENDPOINT is set
+opentelemetry-exporter-otlp-proto-http==1.44.0
+
 pytest==9.1.1

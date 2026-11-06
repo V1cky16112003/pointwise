@@ -8,6 +8,7 @@ the shutdown drain in `docs/production.md` still apply) behind `@modal.web_serve
 | Piece | Name | Holds |
 |---|---|---|
 | Secret | `pointwise-key` | `POINTWISE_API_KEY` |
+| Secret | `pointwise-grafana` | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS` (create it first: `docs/monitoring.md`) |
 | Volume | `pointwise-weights` | `state.pt` and `metrics.json` from the same run (the server refuses a mismatched pair) |
 | Image | built from `requirements-serve.txt`, torch 2.11.0 (`cu128`) | the code, plus the Qwen3-1.7B-Base download, baked in at build time |
 | App | `pointwise`, GPU `T4`, `min_containers=0`, `max_containers=1`, `scaledown_window=60`, `max_inputs=16` | one server; the server has a single GPU lock and cache, so never raise `max_containers` |
@@ -18,6 +19,7 @@ the shutdown drain in `docs/production.md` still apply) behind `@modal.web_serve
 pip install modal && modal setup
 export KEY=$(openssl rand -hex 24)                       # keep it; never paste it into logs or chats
 modal secret create pointwise-key POINTWISE_API_KEY=$KEY
+# Required by deploy/modal_app.py: create pointwise-grafana as in docs/monitoring.md (monitoring setup)
 modal volume create pointwise-weights
 modal volume put pointwise-weights weights/state.pt /state.pt
 modal volume put pointwise-weights weights/metrics.json /metrics.json

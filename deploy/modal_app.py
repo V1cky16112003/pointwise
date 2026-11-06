@@ -1,5 +1,5 @@
 """Pointwise on Modal: one T4, scales to zero. Run with `modal serve deploy/modal_app.py` (temporary URL) or
-`modal deploy deploy/modal_app.py` (permanent). Needs the Secret `pointwise-key` (POINTWISE_API_KEY) and the Volume
+`modal deploy deploy/modal_app.py` (permanent). Needs the Secrets `pointwise-key` (POINTWISE_API_KEY) and `pointwise-grafana` (OTEL_*, docs/monitoring.md) and the Volume
 `pointwise-weights` (state.pt and metrics.json from the same run). See docs/modal.md."""
 import subprocess
 
@@ -42,7 +42,10 @@ image = (
     image=image,
     gpu="T4",  # the only GPU measured (reports/pointwise-load.md)
     volumes={"/weights": weights},
-    secrets=[modal.Secret.from_name("pointwise-key")],  # provides POINTWISE_API_KEY
+    secrets=[
+        modal.Secret.from_name("pointwise-key"),  # provides POINTWISE_API_KEY
+        modal.Secret.from_name("pointwise-grafana"),  # provides OTEL_EXPORTER_OTLP_*; the deploy fails if it does not exist
+    ],
     min_containers=0,  # scale to zero: no traffic, no cost
     max_containers=1,  # the server has one GPU lock and one cache; also a cost cap
     scaledown_window=60,  # idle seconds before the container stops

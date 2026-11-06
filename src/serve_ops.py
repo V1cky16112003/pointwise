@@ -1,5 +1,5 @@
 """Operational plumbing for src/serve.py (Pointwise production step 3): request ids, the optional API key, the
-shutdown drain flag, request metrics and the middleware that applies them. No torch, only ASGI, so it is tested without
+shutdown drain flag and the middleware that applies them. No torch, only ASGI, so it is tested without
 a model.
 
 Rules the middleware follows:
@@ -7,7 +7,7 @@ Rules the middleware follows:
   is echoed in the X-Request-Id response header and put on every log line made while handling the request.
 - Logs carry metadata only (method, route, status, milliseconds), never the body or the query string.
 - With an API key set, every path except /healthz and /readyz needs `Authorization: Bearer <key>`.
-- While draining (shutdown has begun), data routes answer 503 + Retry-After; health, readiness and metrics still answer.
+- While draining (shutdown has begun), data routes answer 503 + Retry-After; health and readiness still answer.
 """
 from __future__ import annotations
 
@@ -23,10 +23,10 @@ import threading
 import time
 import traceback
 import uuid
-from bisect import bisect_left
-from collections import Counter
 
 from starlette.responses import JSONResponse
+
+from src import telemetry
 
 logger = logging.getLogger("src.serve")
 
@@ -34,9 +34,7 @@ request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("request_id
 _ID = re.compile(r"[A-Za-z0-9._-]{1,64}")  # used with fullmatch: `$` would also accept a trailing newline
 
 OPEN_PATHS = frozenset({"/healthz", "/readyz"})  # probes never carry the key
-DRAIN_OPEN_PATHS = OPEN_PATHS | {"/metrics"}
-QUIET_PATHS = frozenset({"/healthz", "/readyz", "/metrics"})  # not logged per request unless they fail
-ROUTES = frozenset({"/v1/systemone", "/predict", "/healthz", "/readyz", "/metrics"})  # anything else is "other"
+ROUTES = frozenset({"/v1/systemone", "/predict", "/healthz", "/readyz"})  # anything else is "other"
 # POINTWISE_SHUTDOWN_GRACE_S is split so the whole shutdown stays within it. Uvicorn sleeps a fixed 0.1 s outside its own
 # timeout and the process needs a moment to close, so SHUTDOWN_MARGIN_S is held back; the rest is split: uvicorn waits for
 # open connections for UVICORN_SHARE of it (a whole number of seconds, as uvicorn takes), the server's own drain gets
@@ -80,47 +78,6 @@ def env_int(name: str, default: int) -> int:
         sys.exit(f"FATAL: {name} must be an integer, got {os.environ[name]!r}.")
 
 
-class Metrics:
-    """Request counters and a latency histogram in the Prometheus text format, with no dependency."""
-
-    BUCKETS = (0.025, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8)  # seconds
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._requests: Counter = Counter()  # (route, status) -> count
-        self._latency: dict[str, list[float]] = {}  # route -> per-bucket counts (last = overflow), then the sum
-
-    def observe(self, route: str, status: int, seconds: float) -> None:
-        with self._lock:
-            self._requests[(route, status)] += 1
-            row = self._latency.setdefault(route, [0] * (len(self.BUCKETS) + 1) + [0.0])
-            row[bisect_left(self.BUCKETS, seconds)] += 1
-            row[-1] += seconds
-
-    def render(self, extra=()) -> str:
-        """The text exposition. `extra` is (name, "gauge" | "counter", help, value) rows owned by the server."""
-        with self._lock:
-            requests = sorted(self._requests.items())
-            latency = {route: list(row) for route, row in sorted(self._latency.items())}
-        out = ["# HELP pointwise_requests_total HTTP requests by route and status.",
-               "# TYPE pointwise_requests_total counter"]
-        out += [f'pointwise_requests_total{{route="{route}",status="{status}"}} {n}' for (route, status), n in requests]
-        out += ["# HELP pointwise_request_duration_seconds Time to answer a request, by route.",
-                "# TYPE pointwise_request_duration_seconds histogram"]
-        for route, row in latency.items():
-            cumulative = 0
-            for bound, n in zip(self.BUCKETS, row):
-                cumulative += n
-                out.append(f'pointwise_request_duration_seconds_bucket{{route="{route}",le="{bound:g}"}} {cumulative}')
-            total = cumulative + row[len(self.BUCKETS)]
-            out += [f'pointwise_request_duration_seconds_bucket{{route="{route}",le="+Inf"}} {total}',
-                    f'pointwise_request_duration_seconds_sum{{route="{route}"}} {row[-1]:.6f}',
-                    f'pointwise_request_duration_seconds_count{{route="{route}"}} {total}']
-        for name, kind, help_text, value in extra:
-            out += [f"# HELP {name} {help_text}", f"# TYPE {name} {kind}", f"{name} {value}"]
-        return "\n".join(out) + "\n"
-
-
 class Ops:
     """What the middleware reads at request time. The server sets api_key at startup and draining at shutdown."""
 
@@ -130,7 +87,6 @@ class Ops:
         self.signalled = False  # a shutdown signal has arrived; unlike draining it survives the app's startup
         self.inflight = 0  # data requests being handled right now (touched only on the event loop)
         self.drain_wait: float | None = None  # set by serve_main to its share; None (plain uvicorn) means the whole grace
-        self.metrics = Metrics()
         self.auth_log = _RateLimitedLog()
 
     def authorised(self, raw_headers) -> bool:
@@ -144,7 +100,7 @@ class Ops:
 
     def reject(self, path: str, raw_headers):
         """A ready-made response if this request must not reach the app (draining, or a missing or wrong key), else None."""
-        if self.draining and path not in DRAIN_OPEN_PATHS:
+        if self.draining and path not in OPEN_PATHS:
             return JSONResponse({"detail": {"error": "shutting_down"}}, status_code=503,
                                 headers={"Retry-After": "1", "Connection": "close"})
         if self.api_key is not None and path not in OPEN_PATHS and not self.authorised(raw_headers):
@@ -178,7 +134,7 @@ OPS = Ops()
 
 
 class RequestContext:
-    """Outermost app middleware: request id, key and drain checks, per-request log line, metrics."""
+    """Outermost app middleware: request id, key and drain checks, per-request log line."""
 
     def __init__(self, app):
         self.app = app
@@ -186,7 +142,7 @@ class RequestContext:
     async def __call__(self, scope, receive, send):
         if scope["type"] == "websocket":  # no websocket routes exist; if one is ever added it must not bypass the checks
             if OPS.reject(scope["path"], scope["headers"]) is not None:
-                OPS.metrics.observe("other", 403, 0.0)  # a close before accept reaches the client as an HTTP 403
+                telemetry.record_request("other", 403, 0.0)  # a close before accept reaches the client as an HTTP 403
                 show, suppressed = OPS.auth_log.allow(time.monotonic())  # as for HTTP 401s: anyone can cause these
                 if suppressed:
                     logger.warning(f"{suppressed} further refused requests in the last window were not logged")
@@ -204,7 +160,7 @@ class RequestContext:
         if not _ID.fullmatch(rid):
             rid = uuid.uuid4().hex
         token = request_id_var.set(rid)
-        counted = path not in QUIET_PATHS
+        counted = path not in OPEN_PATHS  # probes are not logged per request unless they fail
         ops.inflight += counted
         start, status, started = time.monotonic(), 500, False  # 500 stands unless a response starts
 
@@ -237,7 +193,7 @@ class RequestContext:
         finally:
             elapsed = time.monotonic() - start
             ops.inflight -= counted
-            ops.metrics.observe(route, status, elapsed)
+            telemetry.record_request(route, status, elapsed)
             line = f"request method={method} route={route} status={status} ms={1000 * elapsed:.0f}"
             if status == 401:  # anyone can cause these, on any path: sample them, and never skip the quiet paths
                 show, suppressed = ops.auth_log.allow(time.monotonic())
