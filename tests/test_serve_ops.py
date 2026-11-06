@@ -1,7 +1,6 @@
-"""Request ids, the API key, the drain flag and metrics (src/serve_ops.py), tested on a tiny ASGI app with no model."""
+"""Request ids, the API key, the drain flag and the request log (src/serve_ops.py), tested on a tiny ASGI app with no model."""
 import logging
 import re
-import threading
 import traceback
 
 import pytest
@@ -16,7 +15,7 @@ from starlette.routing import Route  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 
 from src import serve_ops as ops_mod  # noqa: E402
-from src.serve_ops import Metrics, Ops, RequestContext, request_id_var  # noqa: E402
+from src.serve_ops import Ops, RequestContext, request_id_var  # noqa: E402
 
 
 @pytest.fixture
@@ -43,7 +42,7 @@ def make_app():
     # added as app middleware, as serve.py does: it sits inside Starlette's own error handler, so an unhandled error
     # reaches RequestContext first
     app = Starlette(routes=[Route("/v1/systemone", echo, methods=["POST"]), Route("/boom", boom), Route("/healthz", ready),
-                            Route("/readyz", ready), Route("/metrics", ready)], middleware=[Middleware(RequestContext)])
+                            Route("/readyz", ready)], middleware=[Middleware(RequestContext)])
     return app, seen
 
 
@@ -80,19 +79,17 @@ def test_log_lines_carry_the_request_id_and_no_body_or_query(client, caplog):
     assert request_id_var.get() == "-"  # reset after the request
 
 
-def test_probe_and_scrape_requests_are_not_logged_unless_they_fail(client, caplog):
+def test_probe_requests_are_not_logged_unless_they_fail(client, caplog):
     with caplog.at_level(logging.INFO, logger="src.serve"):
-        for path in ("/healthz", "/readyz", "/metrics"):
+        for path in ("/healthz", "/readyz"):
             client.get(path)
     assert not any(r.getMessage().startswith("request ") for r in caplog.records)
 
 
-def test_an_unhandled_error_is_counted_as_a_500_and_logged_without_its_text(client, ops, caplog):
+def test_an_unhandled_error_is_logged_without_its_text(client, ops, caplog):
     with caplog.at_level(logging.INFO, logger="src.serve"):
         got = client.get("/boom")
     assert got.status_code == 500
-    text = ops.metrics.render()
-    assert 'pointwise_requests_total{route="other",status="500"} 1' in text
     assert any("status=500" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
     assert "secret detail" not in caplog.text
 
@@ -112,8 +109,6 @@ def test_with_a_key_data_routes_need_it_and_probes_do_not(client, ops):
         assert "x-request-id" in got.headers  # a rejection still has its id
     assert client.post("/v1/systemone", headers={"Authorization": "Bearer s3cret-key"}).status_code == 200
     assert client.post("/v1/systemone", headers={"Authorization": "bearer s3cret-key"}).status_code == 200  # scheme: any case
-    assert client.get("/metrics").status_code == 401  # metrics are not public when a key is set
-    assert client.get("/metrics", headers={"Authorization": "Bearer s3cret-key"}).status_code == 200
     assert client.get("/docs").status_code == 401 and client.get("/nothing-here").status_code == 401  # deny by default
 
 
@@ -124,54 +119,11 @@ def test_a_wrong_key_does_not_reach_the_app_and_the_key_is_never_logged(client, 
     assert "inside the handler" not in caplog.text and "s3cret" not in caplog.text
 
 
-def test_draining_turns_away_data_routes_but_keeps_probes_and_metrics(client, ops):
+def test_draining_turns_away_data_routes_but_keeps_probes(client, ops):
     ops.draining = True
     got = client.post("/v1/systemone")
     assert got.status_code == 503 and got.headers["retry-after"] == "1" and got.json()["detail"]["error"] == "shutting_down"
     assert client.get("/healthz").status_code == 200 and client.get("/readyz").status_code == 200
-    assert client.get("/metrics").status_code == 200
-
-
-def test_metrics_counts_by_route_and_status_and_builds_a_cumulative_histogram():
-    m = Metrics()
-    for seconds in (0.01, 0.03, 0.03, 0.3, 100.0):
-        m.observe("/v1/systemone", 200, seconds)
-    m.observe("/v1/systemone", 503, 0.0)
-    m.observe("other", 404, 0.001)
-    text = m.render([("pointwise_queue_waiting", "gauge", "Waiting.", 3)])
-    assert 'pointwise_requests_total{route="/v1/systemone",status="200"} 5' in text
-    assert 'pointwise_requests_total{route="/v1/systemone",status="503"} 1' in text
-    assert 'pointwise_requests_total{route="other",status="404"} 1' in text
-    bucket = {le: int(n) for le, n in re.findall(r'systemone",le="([^"]+)"\} (\d+)', text)}
-    assert bucket["0.025"] == 2 and bucket["0.05"] == 4 and bucket["0.4"] == 5  # 0.0 and 0.01 | + two 0.03s | + 0.3
-    assert bucket["12.8"] == 5 and bucket["+Inf"] == 6  # the 100 s request only in +Inf
-    assert 'pointwise_request_duration_seconds_count{route="/v1/systemone"} 6' in text
-    assert re.search(r'pointwise_request_duration_seconds_sum\{route="/v1/systemone"\} 100\.37', text)
-    assert "# TYPE pointwise_queue_waiting gauge\npointwise_queue_waiting 3\n" in text
-    values = [int(n) for n in re.findall(r'systemone",le="[^+][^"]*"\} (\d+)', text)]
-    assert values == sorted(values)  # buckets are cumulative
-
-
-def test_metrics_stay_correct_when_many_threads_record_at_once():
-    m = Metrics()
-
-    def work():
-        for _ in range(500):
-            m.observe("/predict", 200, 0.01)
-
-    threads = [threading.Thread(target=work) for _ in range(8)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    assert 'pointwise_requests_total{route="/predict",status="200"} 4000' in m.render()
-
-
-def test_only_known_routes_get_their_own_label(client, ops):
-    client.get("/anything/1")
-    client.get("/anything/2")
-    text = ops.metrics.render()
-    assert 'route="other",status="404"} 2' in text and "anything" not in text  # no label explosion from arbitrary paths
 
 
 def test_two_authorization_headers_are_refused_even_if_one_is_right(client, ops):
@@ -194,7 +146,6 @@ def test_an_unhandled_error_still_gets_a_request_id_a_generic_body_and_a_logged_
     assert failure.request_id == "trace-me" and failure.levelno == logging.ERROR  # the id is on the failure's own line
     assert "test_serve_ops.py" in failure.getMessage() and "boom" in failure.getMessage()  # where it happened...
     assert "secret detail" not in caplog.text  # ...not what it said
-    assert 'pointwise_requests_total{route="other",status="500"} 1' in ops.metrics.render()
 
 
 def test_a_cancelled_request_is_a_499_not_a_server_error(ops, caplog):
@@ -214,26 +165,25 @@ def test_a_cancelled_request_is_a_499_not_a_server_error(ops, caplog):
 
     with caplog.at_level(logging.INFO, logger="src.serve"), pytest.raises(asyncio.CancelledError):
         asyncio.run(run())
-    assert 'pointwise_requests_total{route="/v1/systemone",status="499"} 1' in ops.metrics.render()
-    assert not caplog.records or all(r.levelno < logging.WARNING for r in caplog.records)
+    assert any("status=499" in r.getMessage() for r in caplog.records)
     assert not any(r.levelno >= logging.WARNING for r in caplog.records) and ops.inflight == 0
 
 
 def test_inflight_counts_data_requests_only_and_returns_to_zero(client, ops):
-    for path in ("/healthz", "/readyz", "/metrics"):
+    for path in ("/healthz", "/readyz"):
         client.get(path)
     client.get("/boom")
     assert ops.inflight == 0
 
 
-def test_failed_auth_is_logged_on_every_path_including_metrics_but_sampled(client, ops, caplog):
+def test_failed_auth_is_logged_on_every_path_including_quiet_ones_but_sampled(client, ops, caplog):
     ops.api_key = "s3cret-key"
     with caplog.at_level(logging.INFO, logger="src.serve"):
-        client.get("/metrics")  # a quiet path, still logged: this is where key guessing would show up
+        client.get("/docs")  # an unknown path, still logged: this is where key guessing would show up
         for _ in range(40):
             client.post("/v1/systemone", headers={"Authorization": "Bearer guess"})
     lines = [r for r in caplog.records if "status=401" in r.getMessage()]
-    assert any("route=/metrics" in r.getMessage() for r in lines)
+    assert any("route=other" in r.getMessage() for r in lines)
     assert client.post("/v1/systemone", headers={"Authorization": "Bearer guess"}).headers["connection"] == "close"
     assert len(lines) == 10 and all(r.levelno == logging.WARNING for r in lines)  # capped at 10 per window, not 41
     assert "guess" not in caplog.text
@@ -274,7 +224,7 @@ def test_websocket_connections_cannot_skip_the_key_or_the_drain(ops):
     assert connect([(b"authorization", b"Bearer s3cret-key")])[0]["type"] == "websocket.close"
 
 
-def test_a_cancel_after_the_response_started_keeps_the_real_status(ops):
+def test_a_cancel_after_the_response_started_keeps_the_real_status(ops, caplog):
     import asyncio
 
     async def answer_then_cancel(scope, receive, send):
@@ -285,10 +235,9 @@ def test_a_cancel_after_the_response_started_keeps_the_real_status(ops):
         scope = {"type": "http", "path": "/v1/systemone", "method": "POST", "headers": []}
         await RequestContext(answer_then_cancel)(scope, None, lambda message: asyncio.sleep(0))
 
-    with pytest.raises(asyncio.CancelledError):
+    with caplog.at_level(logging.INFO, logger="src.serve"), pytest.raises(asyncio.CancelledError):
         asyncio.run(run())
-    text = ops.metrics.render()
-    assert 'status="200"} 1' in text and 'status="499"' not in text
+    assert any("status=200" in r.getMessage() for r in caplog.records)  # the real status stands, not 499
 
 
 def test_the_first_window_starts_at_the_first_event_whatever_the_clock_says():
@@ -297,7 +246,7 @@ def test_the_first_window_starts_at_the_first_event_whatever_the_clock_says():
     assert log.allow(13.5) == (True, 1)  # next window reports the one that was left out
 
 
-def test_a_refused_websocket_is_counted_and_logged(ops, caplog):
+def test_a_refused_websocket_is_logged(ops, caplog):
     import asyncio
 
     async def accept(scope, receive, send):
@@ -312,7 +261,7 @@ def test_a_refused_websocket_is_counted_and_logged(ops, caplog):
     ops.api_key = "s3cret-key"
     with caplog.at_level(logging.WARNING, logger="src.serve"):
         asyncio.run(RequestContext(accept)({"type": "websocket", "path": "/ws", "headers": []}, receive, send))
-    assert 'route="other",status="403"} 1' in ops.metrics.render() and "websocket connection refused" in caplog.text
+    assert "websocket connection refused" in caplog.text
 
 
 def test_a_websocket_that_disconnects_before_the_refusal_gets_no_close(ops):
@@ -361,7 +310,7 @@ def test_a_failure_after_the_response_started_is_logged_with_its_id_and_cannot_c
     assert raised.value.__suppress_context__  # `from None`: the original, with its message, is not chained to it
     assert "4111" not in caplog.text and "4111" not in "".join(traceback.format_exception(raised.value))
     assert any(r.request_id == "late-1" and "unhandled KeyError" in r.getMessage() for r in caplog.records)
-    assert 'status="200"} 1' in ops.metrics.render()  # the real status stands
+    assert "status=200" in caplog.text  # the real status stands
     assert ops.inflight == 0
 
 
@@ -382,4 +331,3 @@ def test_refused_websockets_are_sampled_like_failed_auth(ops, caplog):
         for _ in range(50):
             asyncio.run(RequestContext(accept)({"type": "websocket", "path": "/ws", "headers": []}, receive, send))
     assert caplog.text.count("websocket connection refused") == 10  # not 50
-    assert 'route="other",status="403"} 50' in ops.metrics.render()  # all are still counted

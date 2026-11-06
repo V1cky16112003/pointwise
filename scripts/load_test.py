@@ -1,11 +1,10 @@
 """Step 7: HTTP load test of the real server on one T4 (docs/designs/pointwise-plan.md). Measures; changes nothing.
 
 1. Start `python -m src.serve_main` on run 3's weights (merged, the default) and time it until /readyz is 200.
-   Check /healthz, /readyz and /metrics, and the API key (401 without it, 200 with it).
+   Check /healthz and /readyz, and the API key (401 without it, 200 with it).
 2. Steady load: CLIENTS concurrent closed-loop clients (each sends its next request when the last one answers), at
    1, 4 and 16, with two mixes: every state new (cold) and half the requests repeating a recent state (cached).
-   PER_LEVEL requests each; k=8 three-option questions on ~512-token states. /metrics is read before and after each
-   run, so the hit rate reported is the one the server saw, not the one intended.
+   PER_LEVEL requests each; k=8 three-option questions on ~512-token states.
 3. Overload: BURST requests at once, more than the queue (16) holds. Expect fast 503s with Retry-After, no 500s.
 4. Shutdown: SIGTERM while 16 clients are busy. /readyz must fail at once, requests already sent must finish (200)
    or get a 503, and the process must exit inside POINTWISE_SHUTDOWN_GRACE_S.
@@ -25,7 +24,6 @@ import json
 import math
 import os
 import random
-import re
 import signal
 import statistics
 import subprocess
@@ -105,24 +103,6 @@ def compare_answers(served: dict, reference: dict) -> dict:
             top = sorted(ref["probabilities"].values(), reverse=True)
             flips.append({"question": key, "margin": top[0] - top[1]})
     return {"max_prob_diff": diff, "flips": flips, "questions": len(reference)}
-
-
-def parse_metrics(text: str) -> dict[str, float]:
-    """Prometheus text -> {'name{labels}': value}, comments skipped."""
-    out = {}
-    for line in text.splitlines():
-        if line and not line.startswith("#"):
-            name, _, value = line.rpartition(" ")
-            out[name] = float(value)
-    return out
-
-
-def metrics_delta(before: dict, after: dict) -> dict:
-    """The counters the report needs, as after minus before."""
-    keys = [k for k in after if k.startswith(("pointwise_state_cache_hits_total", "pointwise_state_cache_misses_total",
-                                              "pointwise_overload_rejections_total"))
-            or re.match(r'pointwise_requests_total\{route="/v1/systemone"', k)]
-    return {k: after[k] - before.get(k, 0.0) for k in keys}
 
 
 async def send(client: httpx.AsyncClient, state_id: int, body: dict, headers: dict) -> dict:
@@ -242,17 +222,11 @@ async def probes(client: httpx.AsyncClient, body: dict) -> dict:
     return {
         "healthz_no_key": (await client.get("/healthz")).status_code,
         "readyz_no_key": (await client.get("/readyz")).status_code,
-        "metrics_no_key": (await client.get("/metrics")).status_code,
-        "metrics_key": (await client.get("/metrics", headers=auth)).status_code,
         "systemone_no_key": (await client.post("/v1/systemone", json=body)).status_code,
         "systemone_wrong_key": (await client.post("/v1/systemone", json=body,
                                                   headers={"Authorization": "Bearer wrong"})).status_code,
         "systemone_key": (await client.post("/v1/systemone", json=body, headers=auth)).status_code,
     }
-
-
-async def scrape(client) -> dict:
-    return parse_metrics((await client.get("/metrics", headers={"Authorization": f"Bearer {API_KEY}"})).text)
 
 
 async def shutdown_check(client, proc, body_for, first_new: int, headers: dict) -> tuple[dict, list[dict]]:
@@ -342,10 +316,9 @@ async def run_server_phase(args, env: dict, body_for) -> dict:
                 times = arrival_times(rate, OPEN_LOOP_S, seed=int(rate * 10))
                 ids = list(range(nxt, nxt + len(times)))
                 nxt += len(times)
-                before = await scrape(client)
                 records, wall = await open_loop(client, ids, times, body_for, headers)
                 row = {"mix": "open-loop cold", "rate_rps": rate, "offered_rps": len(times) / OPEN_LOOP_S,
-                       **level_row(records, wall, 0), "server_counters": metrics_delta(before, await scrape(client))}
+                       **level_row(records, wall, 0)}
                 out["levels"].append(row)
                 served += [r for r in records if r["status"] == 200]
                 print(json.dumps({k: row[k] for k in ("rate_rps", "statuses", "throughput_rps", "latency_ms")}), flush=True)
@@ -353,11 +326,10 @@ async def run_server_phase(args, env: dict, body_for) -> dict:
                 for clients in CLIENTS:
                     ids = request_mix(PER_LEVEL, share, seed=clients, first_new=nxt)
                     nxt = max(ids) + 1
-                    before = await scrape(client)
                     with GpuMemory() as mem:
                         records, wall = await closed_loop(client, ids, body_for, clients, headers)
                     row = {"mix": mix, "intended_repeat_share": share, **level_row(records, wall, clients),
-                           "server_counters": metrics_delta(before, await scrape(client)), "gpu_mib_peak": mem.peak}
+                           "gpu_mib_peak": mem.peak}
                     out["levels"].append(row)
                     served += [r for r in records if r["status"] == 200]
                     print(json.dumps({k: row[k] for k in ("mix", "clients", "statuses", "throughput_rps", "latency_ms")}), flush=True)
@@ -366,10 +338,9 @@ async def run_server_phase(args, env: dict, body_for) -> dict:
                 served += [r for r in records if r["status"] == 200]
                 out["served"] = served
                 return out
-            before = await scrape(client)
             burst = await asyncio.gather(*(send(client, nxt + i, body_for(nxt + i), headers) for i in range(BURST)))
             nxt += BURST
-            out["burst"] = {**level_row(list(burst), 1, BURST), "server_counters": metrics_delta(before, await scrape(client)),
+            out["burst"] = {**level_row(list(burst), 1, BURST),
                             "retry_after_on_every_503": all(r["retry_after"] for r in burst if r["status"] == 503),
                             "ms_503": summarise([r["ms"] for r in burst if r["status"] == 503])}
             served += [r for r in burst if r["status"] == 200]

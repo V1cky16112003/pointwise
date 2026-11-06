@@ -1,5 +1,7 @@
 # Pointwise HTTP load test (production plan step 7)
 
+> Note (2026-11-05): the `/metrics` endpoint and the Prometheus code it used were removed from the server; this report describes the earlier version, and monitoring will be chosen later.
+
 One Kaggle T4 session, 2026-10-29, commit 8f5579b, `scripts/load_test.py`; raw numbers in `reports/load_test.json`.
 The real server (`python -m src.serve_main`) ran on run 3 (`state.pt` step 1541, T 1.516, adapter merged, the default)
 through `load_pointwise`, with the `requirements-serve.txt` pins (torch 2.11.0+cu128, transformers 5.14.1, peft 0.21.2,

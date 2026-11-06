@@ -6,7 +6,6 @@ the endpoint's body is exactly model.decide()'s, and bad input is a 4xx, never a
 """
 import json
 import logging
-import re
 import threading
 import time
 
@@ -371,14 +370,13 @@ def test_bad_queue_settings_stop_startup(tmp_path, monkeypatch):
         serve.configure_from_env()
 
 
-def test_overload_is_logged_counted_and_shows_how_long_the_gpu_has_been_busy(client, monkeypatch, caplog):
+def test_overload_is_logged_and_shows_how_long_the_gpu_has_been_busy(client, monkeypatch, caplog):
     monkeypatch.setattr(serve, "_max_queue", 0)
-    before = serve._rejected
     with caplog.at_level("WARNING", logger="src.serve"):
         with serve._gpu():  # a request holds the GPU
             assert serve._busy_since is not None
             assert client.post("/v1/systemone", json=REQUEST).status_code == 503
-    assert serve._busy_since is None and serve._rejected == before + 1
+    assert serve._busy_since is None
     assert any("overloaded: queue is full" in r.message and "gpu_busy_for=" in r.message for r in caplog.records)
     assert "Shoes arrived" not in caplog.text  # metadata only
 
@@ -561,10 +559,8 @@ def test_concurrent_http_requests_are_never_a_500(client):
 
 @pytest.fixture
 def ops(monkeypatch):
-    """The server's shared operations state, with a fresh metrics store, restored afterwards."""
-    from src.serve_ops import Metrics
+    """The server's shared operations state, restored afterwards."""
 
-    monkeypatch.setattr(serve.OPS, "metrics", Metrics())
     monkeypatch.setattr(serve.OPS, "api_key", None)
     monkeypatch.setattr(serve.OPS, "draining", False)
     return serve.OPS
@@ -600,12 +596,12 @@ def test_readyz_fails_when_one_request_has_held_the_gpu_too_long(client, ops, mo
     assert "held the GPU for 30s (limit 5s)" in caplog.text and "held the GPU" not in got.text  # timing stays in the log
 
 
-def test_probe_and_metrics_routes_are_async_so_they_never_need_a_pool_thread():
+def test_probe_routes_are_async_so_they_never_need_a_pool_thread():
     """The design rule behind MAX_QUEUE_LIMIT. This checks the rule, not pool starvation itself, which the test client
     cannot reproduce."""
     import inspect
 
-    for route in (serve.healthz, serve.readyz, serve.metrics):
+    for route in (serve.healthz, serve.readyz):
         assert inspect.iscoroutinefunction(route), route.__name__
 
 
@@ -614,30 +610,6 @@ def test_probes_answer_while_the_queue_is_full_and_the_gpu_is_held(client, ops, 
     with serve._gpu_lock:
         assert client.post("/v1/systemone", json=REQUEST).status_code == 503
         assert client.get("/healthz").status_code == 200 and client.get("/readyz").status_code == 200
-        assert client.get("/metrics").status_code == 200
-
-
-def test_metrics_report_requests_queue_gpu_and_cache(client, ops, monkeypatch):
-    client.post("/v1/systemone", json=REQUEST)  # a miss
-    client.post("/v1/systemone", json=REQUEST)  # a hit
-    client.post("/v1/systemone", json={})  # a 422
-    monkeypatch.setattr(serve, "_max_queue", 0)
-    with serve._gpu_lock:
-        client.post("/v1/systemone", json=REQUEST)  # a 503
-    got = client.get("/metrics")
-    assert got.status_code == 200 and got.headers["content-type"].startswith("text/plain; version=0.0.4")
-    text = got.text
-    assert 'pointwise_requests_total{route="/v1/systemone",status="200"} 2' in text
-    assert 'pointwise_requests_total{route="/v1/systemone",status="422"} 1' in text
-    assert 'pointwise_requests_total{route="/v1/systemone",status="503"} 1' in text
-    assert "pointwise_state_cache_hits_total 1" in text and "pointwise_state_cache_misses_total 1" in text
-    assert "pointwise_state_cache_entries 1" in text
-    n = len(serve._pointwise.encode(SystemOneRequest.model_validate(REQUEST)).state_ids)
-    assert f"pointwise_state_cache_tokens {n}" in text
-    assert "pointwise_ready 1" in text and "pointwise_queue_waiting 0" in text and "pointwise_gpu_busy_seconds 0" in text
-    assert re.search(r"pointwise_overload_rejections_total [1-9]", text)
-    assert 'pointwise_request_duration_seconds_count{route="/v1/systemone"} 4' in text
-    assert "Shoes arrived" not in text  # numbers only
 
 
 def test_the_api_key_protects_the_real_routes_and_not_the_probes(client, ops):
@@ -645,7 +617,6 @@ def test_the_api_key_protects_the_real_routes_and_not_the_probes(client, ops):
     assert client.get("/healthz").status_code == 200 and client.get("/readyz").status_code == 200
     assert client.post("/v1/systemone", json=REQUEST).status_code == 401
     assert client.post("/predict", json={"message": "hi"}).status_code == 401
-    assert client.get("/metrics").status_code == 401
     assert client.get("/openapi.json").status_code == 401  # the schema is not public either
     got = client.post("/v1/systemone", json=REQUEST, headers={"Authorization": "Bearer k-123"})
     assert got.status_code == 200 and "x-request-id" in got.headers
@@ -745,7 +716,7 @@ def test_a_draining_server_turns_data_requests_away_but_stays_observable(client,
     assert got.status_code == 503 and got.headers["retry-after"] == "1"
     ready = client.get("/readyz")
     assert ready.status_code == 503 and ready.json() == {"status": "not ready"}
-    assert client.get("/healthz").status_code == 200 and client.get("/metrics").status_code == 200
+    assert client.get("/healthz").status_code == 200
 
 
 @pytest.mark.parametrize("bad", ["abc", "nan", "inf", "-5", "0", "1", "0.5", "2.99"])
@@ -1066,3 +1037,39 @@ def test_startup_picks_the_apple_gpu_when_there_is_no_cuda(tmp_path, monkeypatch
     with pytest.raises(SystemExit, match="stop after"):
         serve.load_pointwise(weights, metrics)
     assert picked == ["mps", "cpu"]
+
+
+def test_gpu_active_time_adds_up_the_time_requests_hold_the_gpu():
+    before = serve._busy_total
+    with serve._gpu():
+        time.sleep(0.05)
+    assert serve._busy_total - before >= 0.05
+
+
+def test_gpu_seconds_include_the_request_still_holding_the_gpu():
+    with serve._gpu():
+        time.sleep(0.05)
+        age, total = serve._gpu_seconds()
+        assert age >= 0.05 and total >= age  # a long or hung request shows before it ends
+    assert serve._gpu_seconds()[0] == 0.0
+
+
+def test_a_cache_lookup_is_counted_even_when_the_decision_then_fails(client, ops, monkeypatch):
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    from src import telemetry
+
+    reader = InMemoryMetricReader()
+    telemetry.start(lambda: 0, lambda: 0, reader=reader)
+    try:
+        def decide_then_fail(request, state_cache, encoded):
+            state_cache.misses += 1  # a lookup happened
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(serve._pointwise, "decide", decide_then_fail)
+        assert client.post("/v1/systemone", json=REQUEST).status_code == 500
+        lookups = [p for rm in reader.get_metrics_data().resource_metrics for sm in rm.scope_metrics for m in sm.metrics
+                   if m.name == "pointwise.state_cache.lookups" for p in m.data.data_points]
+        assert sum(p.value for p in lookups) == 1
+    finally:
+        telemetry.shutdown()

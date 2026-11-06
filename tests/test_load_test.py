@@ -48,17 +48,6 @@ def test_compare_answers_catches_another_states_answers_and_records_the_margin()
     assert got["max_prob_diff"] == pytest.approx(0.4) and got["flips"] == [{"question": "q", "margin": pytest.approx(0.3)}]
 
 
-def test_metrics_parsing_and_deltas():
-    text = ('# HELP x\npointwise_requests_total{route="/v1/systemone",status="200"} 5\n'
-            'pointwise_state_cache_hits_total 3\npointwise_queue_waiting 2\n')
-    before = L.parse_metrics(text)
-    after = {**before, 'pointwise_requests_total{route="/v1/systemone",status="200"}': 9.0,
-             'pointwise_requests_total{route="/v1/systemone",status="503"}': 1.0}
-    assert L.metrics_delta(before, after) == {'pointwise_requests_total{route="/v1/systemone",status="200"}': 4.0,
-                                              'pointwise_requests_total{route="/v1/systemone",status="503"}': 1.0,
-                                              "pointwise_state_cache_hits_total": 0.0}
-
-
 def test_level_row_counts_statuses_and_littles_law():
     records = [{"status": 200, "ms": 100.0}] * 8 + [{"status": 503, "ms": 1.0}, {"status": None, "error": "ConnectError", "ms": 1.0}]
     row = L.level_row(records, wall_s=0.2, clients=2)
