@@ -99,7 +99,17 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
         },
         "overrides": []
       },
@@ -127,7 +137,7 @@
             "type": "prometheus",
             "uid": "${DS_PROM}"
           },
-          "expr": "sum(increase(pointwise_requests_total{route=\"/v1/systemone\",status=~\"5..\"}[$__range])) / sum(increase(pointwise_requests_total{route=\"/v1/systemone\"}[$__range]))",
+          "expr": "(sum(increase(pointwise_requests_total{route=\"/v1/systemone\",status=~\"5..\"}[$__range])) or vector(0)) / sum(increase(pointwise_requests_total{route=\"/v1/systemone\"}[$__range]))",
           "legendFormat": "__auto",
           "instant": true
         }
@@ -175,14 +185,24 @@
             "type": "prometheus",
             "uid": "${DS_PROM}"
           },
-          "expr": "sum(increase(pointwise_overload_rejections_total[$__range]))",
+          "expr": "sum(increase(pointwise_overload_rejections_total[$__range])) or vector(0)",
           "legendFormat": "__auto",
           "instant": true
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
         },
         "overrides": []
       },
@@ -210,14 +230,24 @@
             "type": "prometheus",
             "uid": "${DS_PROM}"
           },
-          "expr": "sum(increase(pointwise_requests_total{route=\"/v1/systemone\",status=~\"4..\"}[$__range]))",
+          "expr": "(sum(increase(pointwise_requests_total{route=\"/v1/systemone\",status=~\"4..\"}[$__range])) or vector(0))",
           "legendFormat": "__auto",
           "instant": true
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
         },
         "overrides": []
       },
@@ -438,7 +468,9 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "percentunit"
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
         },
         "overrides": []
       },
@@ -486,7 +518,16 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "currencyUSD"
+          "unit": "currencyUSD",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
         },
         "overrides": []
       },
@@ -521,7 +562,16 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "percentunit"
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
         },
         "overrides": []
       },
@@ -556,7 +606,16 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "currencyUSD"
+          "unit": "currencyUSD",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
         },
         "overrides": []
       },
@@ -591,7 +650,16 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "s"
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
         },
         "overrides": []
       },
@@ -601,7 +669,7 @@
       "id": 19,
       "type": "timeseries",
       "title": "Estimated cost per hour",
-      "description": "Dollars per hour of container uptime. Zero when the service is scaled to zero.",
+      "description": "Cost of the trailing hour (a sliding one-hour sum, so a short session shows as a plateau about an hour wide). Zero when the service is scaled to zero.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROM}"
@@ -626,7 +694,8 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "currencyUSD"
+          "unit": "currencyUSD",
+          "min": 0
         },
         "overrides": []
       },

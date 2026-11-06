@@ -133,6 +133,13 @@ modal deploy deploy/modal_demo.py                        # the demo page
 The base model (about 3.4 GB) is baked into the Modal image at build time, so the first build is slow. To call the
 service, use its `.modal.run` URL in place of `localhost:8000` in the quickstart.
 
+### Monitoring
+
+The service pushes metrics (requests, latency, queue, state-cache hits, estimated GPU cost) with OpenTelemetry to
+Grafana Cloud. It is off unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set, and the Modal app sets it from the
+`pointwise-grafana` secret. Nothing is scraped, so scale-to-zero still works; there are no alerts. Setup and the
+dashboard import are in `docs/monitoring.md`.
+
 Measured once on 2026-11-03: a cold start took about 20 s (19.4 s in Modal's log), and the same request on a warm
 container took 0.51 s from a Mac. Those are single samples, not a distribution, and the load numbers below were
 measured on Kaggle, not on Modal. A T4 costs about $0.59 an hour while a container runs. Anyone with the service URL
@@ -237,6 +244,7 @@ src/pointwise/          the model: schema (API contract), encoding, packing, poi
 src/pointwise/data/     training-data converters (public sources, policy generator, rule records)
 src/serve.py            FastAPI: /v1/systemone, /healthz, /readyz (and the Phase 0 /predict demo)
 src/serve_ops.py        request ids, API key, drain flag, request log middleware
+src/telemetry.py        OpenTelemetry metrics pushed to Grafana Cloud (inert unless configured)
 src/serve_main.py       `python -m src.serve_main`: the one-process runner that drains on SIGTERM
 Dockerfile              CUDA 12.8 image for one GPU
 deploy/                 Modal apps: modal_app.py (the service on a T4), modal_demo.py (the demo page on CPU)
@@ -244,6 +252,7 @@ demo/pointwise_app.py   the Gradio demo page (demo/app.py is the older Phase 0 d
 weights/                run 3's state.pt (Git LFS) and metrics.json
 docs/production.md      the operator's guide
 docs/modal.md           deploying the service on Modal
+docs/monitoring.md      Grafana Cloud metrics, dashboard import, cost estimate
 docs/modal-demo.md      deploying and checking the demo page
 docs/designs/           architecture, plans and run logs for every phase
 reports/                evaluation, latency, load and token reports, with their raw JSON
@@ -263,7 +272,7 @@ The code from before Pointwise is kept on the `legacy-main` branch.
 ```bash
 pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements-serve.txt
-pytest tests -q          # about 300 passed, 1 skipped
+pytest tests -q          # about 328 passed, 1 skipped
 ```
 
 If the count is about half that, the serving tests were skipped. They need `peft`, `httpx` and the
