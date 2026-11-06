@@ -67,8 +67,8 @@ gap. Grafana Cloud's own usage page shows whether monitoring stays inside the fr
 3. Import the dashboard `docs/grafana-dashboard.json`: in Grafana go to **Dashboards > New > Import**, upload the file,
    pick your Prometheus data source (`grafanacloud-<stack>-prom`) for the `Prometheus` input, and click **Import**. It has
    rows for traffic, latency, queue and cache, and cost. The queries are the ones in the table above.
-   Set the `T4 price per second` box at the top to Modal's current T4 rate (the file's default, 0.000164, is from memory,
-   not checked). The time range controls the cost panels (cost in the range = uptime in the range x the price).
+   Set the `T4 price per second` box at the top to Modal's current T4 rate (the file's default, 0.000164, is Modal's $0.59 per hour
+   divided by 3600; checked against Modal's pricing on 2026-11-06). The time range controls the cost panels (cost in the range = uptime in the range x the price).
 4. No data? Check the Modal logs for `telemetry: pushing metrics` (started) or `telemetry: not started` (a bad setting;
    serving continues without metrics), and the Secret's endpoint and token.
 
