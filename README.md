@@ -92,6 +92,8 @@ docker run --rm --gpus 1 -p 8000:8000 --stop-timeout 30 \
   pointwise
 ```
 
+On an Apple Silicon Mac the server picks the `mps` GPU and loads in fp16 (about 140 ms for k=8 in process), which is
+fine for development and demos but not for serving; Docker on macOS cannot reach that GPU (`reports/pointwise-mac-smoke.md`).
 Without Docker, run `python -m src.serve_main` with the same env vars, on a host that has the `requirements-serve.txt`
 pins installed. Every env var, with its default and its valid range, is in `docs/production.md`, section 3. The most
 important ones:
@@ -211,6 +213,18 @@ request as soon as the last one answers.
 
 Past about 4 clients, throughput stops rising and each extra client only adds waiting.
 
+Through HTTP, with open-loop traffic (requests arrive on a random Poisson schedule whether or not earlier ones have
+answered), all new states, 60 s per rate (`reports/pointwise-load.md`, "Open-loop arrivals"):
+
+| Rate (req/s) | Status | Served req/s | p95 |
+|---|---|---|---|
+| 2 | 200 x 130 | 2.17 | 317 ms |
+| 4 | 200 x 268 | 4.49 | 511 ms |
+| 6 | 200 x 356, 503 x 11 | 5.89 | 2,678 ms |
+| 8 | 200 x 376, 503 x 99 | 6.08 | 2,802 ms |
+
+One T4 holds about 4 requests a second comfortably and sheds load with 503 above about 6.
+
 **Under load:**
 - **Correctness:** every answer matched the serial reference, with a maximum probability difference of 0.0036 over
   10,032 questions.
@@ -232,7 +246,7 @@ The full table, with every number and its source, is in `docs/production.md`, se
 - **Long states:** accuracy on states longer than the 384 tokens it was trained on was never measured. The server's limit allows 4,096.
 - **Cold latency:** cold p95 is 160 ms, against the 150 ms target.
 - **Untested:** the Docker image itself has never run on a GPU (the same server process and pins have, on Kaggle and on
-  Modal), and open-loop load is untested. Whether the shutdown drain runs on Modal was not checked.
+  Modal), and Modal's own load was never measured (the load numbers come from Kaggle). Whether the shutdown drain runs on Modal was not checked.
 - **Demo:** its three presets were picked from Pointwise's stronger tasks and were not scored before release, so one
   example proves nothing about accuracy; use the Results table. Its rate limit is a per-container speed bump.
 - **Evidence base:** one training run with one seed; calibration differences have no confidence intervals.
@@ -254,9 +268,13 @@ docs/production.md      the operator's guide
 docs/modal.md           deploying the service on Modal
 docs/monitoring.md      Grafana Cloud metrics, dashboard import, cost estimate
 docs/modal-demo.md      deploying and checking the demo page
+docs/grafana-dashboard.json  Grafana dashboard to import (19 panels)
+.github/workflows/ci.yml  CI: unit tests, serving tests (must not skip), Docker build and import check
 docs/designs/           architecture, plans and run logs for every phase
+docs/superpowers/specs/ design specs for the demo page and the monitoring
+LOGBOOK.md, TODOS.md    Phase 0 logbook and open items
 reports/                evaluation, latency, load and token reports, with their raw JSON
-scripts/                Kaggle job, evaluation, latency profiling, load test, token counts
+scripts/                Kaggle job, evaluation, latency profiling, load test (closed and open loop), token counts, smoke test
 tests/                  CPU tests (tiny random models, no GPU)
 ```
 
